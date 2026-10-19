@@ -69,12 +69,14 @@ pub async fn pick_adapter(
 
 pub async fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue)> {
     let al = adapter.limits();
-    let mut limits = wgpu::Limits::default();
     // Large grids need big storage buffers; take whatever the adapter offers.
-    limits.max_buffer_size = al.max_buffer_size;
-    limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
-    limits.max_storage_buffers_per_shader_stage = al.max_storage_buffers_per_shader_stage.min(16);
-    limits.max_texture_dimension_3d = al.max_texture_dimension_3d;
+    let limits = wgpu::Limits {
+        max_buffer_size: al.max_buffer_size,
+        max_storage_buffer_binding_size: al.max_storage_buffer_binding_size,
+        max_storage_buffers_per_shader_stage: al.max_storage_buffers_per_shader_stage.min(16),
+        max_texture_dimension_3d: al.max_texture_dimension_3d,
+        ..wgpu::Limits::default()
+    };
     let features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
@@ -105,7 +107,7 @@ impl Gpu {
     /// Largest power-of-two grid size whose complex FFT buffers fit the device limits.
     pub fn max_grid_size(device: &wgpu::Device) -> u32 {
         let l = device.limits();
-        let max_bind = (l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size);
+        let max_bind = l.max_storage_buffer_binding_size.min(l.max_buffer_size);
         let mut n = 32u32;
         while n < 512 && (2 * n as u64).pow(3) * 8 <= max_bind {
             n *= 2;

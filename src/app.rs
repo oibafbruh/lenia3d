@@ -311,9 +311,11 @@ impl State {
                     if event.state == ElementState::Released {
                         self.input.keys.remove(&code);
                     } else if !self.egui_ctx.egui_wants_keyboard_input() {
-                        if !event.repeat {
-                            self.on_key(el, code);
-                        } else if matches!(code, KeyCode::BracketLeft | KeyCode::BracketRight | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Period) {
+                        let repeatable = matches!(
+                            code,
+                            KeyCode::BracketLeft | KeyCode::BracketRight | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Period
+                        );
+                        if !event.repeat || repeatable {
                             self.on_key(el, code);
                         }
                         self.input.keys.insert(code);
@@ -877,7 +879,7 @@ impl State {
 
         // statistics (mass, center of mass) every few frames
         let mut mass_submitted = false;
-        if self.frame_index % 3 == 0 {
+        if self.frame_index.is_multiple_of(3) {
             let (buf, groups, bytes) = self.world.sim.mass_buffer();
             let channels = self.world.sim.channels.len();
             let layout = self.world.sim.layout_id() ^ ((self.world.n() as u64) << 48);

@@ -494,7 +494,7 @@ fn kernel_editor(ui: &mut egui::Ui, k: &mut KernelParams, nch: usize, id: usize)
         let r = i as f64 / 200.0;
         [r, kernel_shell(r, &k.b, k.kn)]
     }).collect();
-    let umax = ((k.m + 4.0 * k.s) as f64).max(0.05).min(1.0);
+    let umax = ((k.m + 4.0 * k.s) as f64).clamp(0.05, 1.0);
     let gpts: Vec<[f64; 2]> = (0..=200).map(|i| {
         let u = i as f64 / 200.0 * umax;
         [u, growth(u, k.m as f64, k.s as f64, k.gn)]
@@ -613,7 +613,7 @@ fn render_section(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Action>
     }
     ui.separator();
     ui.heading("Light");
-    ui.add(egui::Slider::new(&mut s.light_azimuth, -3.14..=3.14).text("direction"));
+    ui.add(egui::Slider::new(&mut s.light_azimuth, -std::f32::consts::PI..=std::f32::consts::PI).text("direction"));
     ui.add(egui::Slider::new(&mut s.light_elevation, 0.05..=1.55).text("height"));
     ui.add(egui::Slider::new(&mut s.light_intensity, 0.0..=4.0).text("intensity"));
     ui.add(egui::Slider::new(&mut s.shadow, 0.0..=1.0).text("shadows"));
