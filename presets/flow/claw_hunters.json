@@ -136,7 +136,7 @@
   "ecology": {
     "enabled": true,
     "eat": 1.0,
-    "eat_min": 0.3,
+    "eat_min": 0.22,
     "social": 0.5,
     "meta_base": 0.002,
     "meta_trait": 0.0005,

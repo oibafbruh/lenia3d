@@ -1,6 +1,6 @@
 {
   "name": "Grazing Drift",
-  "description": "Shy singing grazers drift through a sparse food field, eat, bud and mate. A carrying capacity keeps the population at roughly 7-16 creatures.",
+  "description": "Shy singing grazers drift through a sparse food field, eat, bud and mate. A carrying capacity keeps the population at roughly 10-18 creatures.",
   "kind": "ecosystem",
   "R": 10.0,
   "T": 5.0,
@@ -131,12 +131,12 @@
     "w_ear": 2.0,
     "claw_bias": 4.0,
     "compat": 0.6,
-    "combat": 1.0
+    "combat": 0.5
   },
   "ecology": {
     "enabled": true,
     "eat": 1.0,
-    "eat_min": 0.3,
+    "eat_min": 0.22,
     "social": 0.5,
     "meta_base": 0.002,
     "meta_trait": 0.0005,

@@ -24,10 +24,10 @@ the median net displacement of tracked ids over 100-step windows.
 | File | Name | Ecology | Seeding (64³) | Measured |
 |---|---|---|---|---|
 | `primordial_flow.json` | Primordial Flow | off | 10 blobs, radius 1.25 R, density 0.8; ear −1…−0.6, voice 0.6…1, all other organs 0, 3 languages | Seed 5: 7 creatures at every sample from step 10 to 1200 (mass about 630 each), median speed 0.0165 cells/step. The same rule with 8 blobs, seeds 3 and 4: 5–6 and 6 creatures (6 at every sample from step 0 to 1500), speed 0.020 and 0.019. Total mass is conserved (5018 ± 1). |
-| `grazing_drift.json` | Grazing Drift | on, capacity 6000 | 8 blobs, radius 1.25 R, density 0.8; eye 0.2…0.6, ear −1…−0.4, voice 0.4…1, mouth 0.4…0.8, claw 0…0.2, alarm 0…0.2 | One 2500-step run in the Lenia3D engine (GPU, lavapipe), with `regrow 0.02`, `capacity 6000` and `combat 1`. Creature count rose from 6 to 16; there were 10 births; mass went 4944 → 6830 (step 800) → 3014 (step 2500) and had flattened out at the end (3036 → 3014 over the last 100 steps). The crowding factor fell from 2.3 to 1.25. Variants with `regrow` 0.03 or 0.04 (capacity 5000–6000) also kept 17–18 creatures, but their mass was still falling at step 2500. The old `regrow 0.01` setting without a capacity starved: mass 6686 → 1794 by step 800. Keep-alive re-seeds founders if everything dies. |
+| `grazing_drift.json` | Grazing Drift | on, capacity 6000 | 8 blobs, radius 1.25 R, density 0.8; eye 0.2…0.6, ear −1…−0.4, voice 0.4…1, mouth 0.4…0.8, claw 0…0.2, alarm 0…0.2 | One 3000-step run in the Lenia3D engine (GPU, lavapipe) with `eat_min 0.22`, `regrow 0.02`, `capacity 6000` and `combat 0.5`. The creature count went 5 → 7–12 → 18, with 19 births. Mass went 4944 → 11175 (step 752) → 4888 (step 3000), and the decline was flattening at the end (5017 → 4888 over the last 250 steps). With `eat_min 0.3` the population faded into wisps instead (mass 1160 at step 5000). With 0.25 it crashed at step 2250. With 0.15 it merged into 1–3 giant blobs. |
 | `claw_hunters.json` | Claw Hunters | on, capacity 6000 | As Grazing Drift but claw 0.2…0.7, `claw_bias` 8 | **Experimental.** Shares Grazing Drift's ecology. With `combat = 1` and claws 0.2–0.7, total mass fell from 4944 to 443 within 100 steps (see caveat below). Shipped with `combat = 0.25`. Keep-alive re-seeds founders if the population dies out. |
 
-Ecology parameters shared by both ecosystem presets: `eat 1.0, eat_min 0.3, social 0.5,
+Ecology parameters shared by both ecosystem presets: `eat 1.0, eat_min 0.22, social 0.5,
 meta_base 0.002, meta_trait 0.0005, toxicity 2, recycle 0.3, regrow 0.02, fertility 0.3,
 mutation_rate 0, mutation_size 0.05, bud_mass 900, bud_age 300, bud_mutation 0.05,
 capacity 6000, keep_alive true`, with
@@ -42,7 +42,8 @@ How the ecology tuning went, all on 64³ with the Drifter rule and 8 founders:
 | 0.3 | 0.03 | 0.01 / 0.005 | starvation: mass 4944 → 92 by step 1200 |
 | 0.15 | 0.03 | 0.003 / 0.001 | starvation: mass 4944 → 214, extinct by step 1400 |
 | 0.3 | 0.01 | 0.002 / 0.0005 | previously shipped: 5–10 creatures and 4 buds in 800 steps, mass declining; on a fast GPU the population vanished within seconds |
-| 0.3 | 0.02 + capacity 6000 | 0.002 / 0.0005 | **shipped**: 6 → 16 creatures in 2500 steps, mass 4944 → 6830 → 3014, flattening out at the end |
+| 0.3 | 0.02 + capacity 6000 | 0.002 / 0.0005 | 6 → 16 creatures in 2500 steps, but mass kept sliding: 3014 at step 2500, 1163 at step 5000 (bodies fade into wisps; their thin halo pays upkeep but cannot eat below `eat_min`) |
+| 0.3 | 0.02 + capacity 6000, `eat_min 0.22`, combat 0.5 | 0.002 / 0.0005 | **shipped**: 18 creatures and 19 births at step 3000, mass about 4900 and flattening |
 
 Trait signal: in the runs with `eat_min = 0` (dust regime), mean `mouth` rose from 0.59 to
 0.85 in 1500 steps. With `eat_min` there was no clear trend within 800–2000 steps.

@@ -30,7 +30,12 @@ pub struct World {
     population_seen: bool,
     /// Founders should be seeded (population died out); see `maintain`.
     pub reseed: bool,
+    /// Generation of the last keep-alive seeding.
+    last_reseed: u64,
 }
+
+/// Minimum steps between keep-alive seedings (founders need time to settle).
+const RESEED_COOLDOWN: u64 = 600;
 
 /// Creatures lighter than this fraction of the budding mass are wisps that
 /// will not recover; keep-alive seeds founders when fewer than two creatures
@@ -93,6 +98,7 @@ impl World {
             seed: 1,
             population_seen: false,
             reseed: false,
+            last_reseed: 0,
         }
     }
 
@@ -179,6 +185,7 @@ impl World {
         self.tracker.reset();
         self.population_seen = false;
         self.reseed = false;
+        self.last_reseed = 0;
     }
 
     /// Forget the population (after clearing the world): keep-alive stays quiet
@@ -277,9 +284,14 @@ impl World {
             let viable = self.tracker.creatures.iter().filter(|c| c.mass >= min_mass).count();
             if viable >= 2 {
                 self.population_seen = true;
-            } else if self.population_seen && eco.enabled && eco.keep_alive {
+            } else if self.population_seen
+                && eco.enabled
+                && eco.keep_alive
+                && (generation < self.last_reseed || generation >= self.last_reseed + RESEED_COOLDOWN)
+            {
                 self.population_seen = false;
                 self.reseed = true;
+                self.last_reseed = generation;
             }
         }
         match &self.sim.flow {
