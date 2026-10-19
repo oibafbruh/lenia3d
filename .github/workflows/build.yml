@@ -21,6 +21,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/lenia3d.exe dist/
+          Copy-Item README.md dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lenia3d-windows
+          path: dist/
       - name: Unit tests
         run: cargo test --release --lib
       - name: GPU tests (WARP software DX12)
@@ -37,16 +47,6 @@ jobs:
         run: |
           ./target/release/lenia3d.exe --list-presets
           ./target/release/lenia3d.exe --bench --steps 10
-      - name: Package
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/lenia3d.exe dist/
-          Copy-Item README.md dist/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: lenia3d-windows
-          path: dist/
 
   # Slow: WARP is a CPU rasterizer and FXC compiles the raymarcher slowly.
   # Separate job so it never delays the Windows artifact.
