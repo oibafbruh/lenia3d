@@ -75,6 +75,12 @@ pub struct EcologyParams {
     /// Minimum age / cooldown (steps) between buddings.
     pub bud_age: f32,
     pub bud_mutation: f32,
+    /// Living mass the world supports per 64³ of volume (0 = unlimited).
+    /// Upkeep is multiplied by 1 + (mass / capacity)², so populations level
+    /// off instead of starving out or filling the world.
+    pub capacity: f32,
+    /// Seed new founders when the population dies out.
+    pub keep_alive: bool,
 }
 
 impl Default for EcologyParams {
@@ -95,6 +101,8 @@ impl Default for EcologyParams {
             bud_mass: 150.0,
             bud_age: 300.0,
             bud_mutation: 0.05,
+            capacity: 6000.0,
+            keep_alive: true,
         }
     }
 }
@@ -246,6 +254,8 @@ pub struct FlowUniform {
     compat: f32,
     combat: f32,
     eat_min: f32,
+    crowd: f32,
+    _pad: [f32; 3],
 }
 
 #[repr(C)]
@@ -428,6 +438,8 @@ struct Plan {
 pub struct FlowState {
     pub params: FlowParams,
     pub eco: EcologyParams,
+    /// Upkeep multiplier from the carrying capacity (set by the creature tracker).
+    pub crowd: f32,
     pub genome: wgpu::Buffer,
     genome_next: wgpu::Buffer,
     pub food: wgpu::Buffer,
@@ -480,6 +492,7 @@ impl FlowState {
             nch,
             params,
             eco,
+            crowd: 1.0,
         }
     }
 
@@ -529,6 +542,8 @@ impl FlowState {
             compat: p.compat,
             combat: p.combat,
             eat_min: e.eat_min.clamp(0.0, 0.95),
+            crowd: self.crowd,
+            _pad: [0.0; 3],
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
     }

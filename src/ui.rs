@@ -764,6 +764,9 @@ fn evolution_section(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Acti
     egui::CollapsingHeader::new(RichText::new("Evolution & ecology").strong()).default_open(true).show(ui, |ui| {
         let e = &mut st.eco;
         ui.checkbox(&mut e.enabled, "Ecology (food, metabolism, reproduction)");
+        ui.checkbox(&mut e.keep_alive, "Keep alive").on_hover_text("Seed new founders when the whole population has died out");
+        ui.add(egui::Slider::new(&mut e.capacity, 0.0..=50000.0).logarithmic(true).text("carrying capacity"))
+            .on_hover_text("Living mass a 64³ world can support. The more creatures, the higher everyone's upkeep, so the population levels off (0 = unlimited)");
         ui.add(egui::Slider::new(&mut e.fertility, 0.0..=1.0).text("default fertility")).on_hover_text("Food level that regrows on normal ground");
         ui.add(egui::Slider::new(&mut e.regrow, 0.0..=0.5).logarithmic(true).text("food regrowth"));
         ui.add(egui::Slider::new(&mut e.eat, 0.0..=5.0).text("eating rate"));
@@ -781,7 +784,7 @@ fn evolution_section(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Acti
             .on_hover_text("Genetic distance (mostly voice pitch = language) above which contact means combat instead of mixing");
         ui.add(egui::Slider::new(&mut f.combat, 0.0..=5.0).text("claw damage"));
         ui.add(egui::Slider::new(&mut f.claw_bias, 0.0..=20.0).text("claw takeover"));
-        ui.add(egui::Slider::new(&mut f.w_eye, 0.0..=5.0).text("eye steering"));
+        ui.add(egui::Slider::new(&mut f.w_eye, 0.0..=10.0).text("eye steering"));
         ui.add(egui::Slider::new(&mut f.w_ear, 0.0..=5.0).text("ear steering"));
         ui.add(egui::Slider::new(&mut f.theta, 0.5..=5.0).text("crowding mass"));
         egui::CollapsingHeader::new("Founder genes").show(ui, |ui| {

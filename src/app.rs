@@ -736,6 +736,7 @@ impl State {
                 let mut enc = device.create_command_encoder(&Default::default());
                 self.world.sim.clear(&mut enc, false);
                 queue.submit([enc.finish()]);
+                self.world.forget_population();
             }
             Action::Soup => {
                 self.ui.follow = false;
@@ -1256,6 +1257,10 @@ impl State {
             let ops = std::mem::take(&mut self.pending_ops);
             self.world.apply_ops(&self.device, &mut enc, &ops);
             self.volume_dirty = true;
+        }
+        if self.world.maintain(&self.device, &mut enc) {
+            self.volume_dirty = true;
+            self.ui.set_status("The population died out: new founders were seeded", now);
         }
 
         // creature tracking readback

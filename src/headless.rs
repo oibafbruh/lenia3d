@@ -82,11 +82,12 @@ pub fn life_tick(g: &Gpu, world: &mut World) -> usize {
     let vals: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
     let f = world.n() / m;
     let ops = world.life_update(&vals, m, f, world.sim.generation);
-    if !ops.is_empty() {
-        let mut enc = g.device.create_command_encoder(&Default::default());
-        world.apply_ops(&g.device, &mut enc, &ops);
-        g.queue.submit([enc.finish()]);
+    let mut enc = g.device.create_command_encoder(&Default::default());
+    world.apply_ops(&g.device, &mut enc, &ops);
+    if world.maintain(&g.device, &mut enc) {
+        eprintln!("  step {:>6}  population died out: founders seeded", world.sim.generation);
     }
+    g.queue.submit([enc.finish()]);
     ops.len()
 }
 
@@ -117,8 +118,19 @@ fn run_steps(g: &Gpu, world: &mut World, steps: u32) {
             {
                 if let Some(s) = world.tracker.history.last() {
                     eprintln!(
-                        "  step {:>6}  creatures {:>3}  mass {:>8.0}  food {:>8.0}  births {births:>3}  eye {:.2} ear {:+.2} voice {:.2} mouth {:.2} claw {:.2} alarm {:.2}  languages {}",
-                        done, s.count, s.mass, s.food, s.eye, s.ear, s.voice, s.mouth, s.claw, s.alarm, s.languages
+                        "  step {:>6}  creatures {:>3}  mass {:>8.0}  food {:>8.0}  crowd {:.2}  births {births:>3}  eye {:.2} ear {:+.2} voice {:.2} mouth {:.2} claw {:.2} alarm {:.2}  languages {}",
+                        done,
+                        s.count,
+                        s.mass,
+                        s.food,
+                        world.sim.flow.as_ref().map_or(1.0, |f| f.crowd),
+                        s.eye,
+                        s.ear,
+                        s.voice,
+                        s.mouth,
+                        s.claw,
+                        s.alarm,
+                        s.languages
                     );
                 }
             }

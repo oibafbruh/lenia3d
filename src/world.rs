@@ -25,6 +25,24 @@ pub struct World {
     pub traits: TraitRanges,
     pub rng: Rng,
     seed: u32,
+    /// A living population was seen since the last (re)seeding; if it dies
+    /// out and keep-alive is on, `reseed` is raised.
+    population_seen: bool,
+    /// Founders should be seeded (population died out); see `maintain`.
+    pub reseed: bool,
+}
+
+/// Living mass below which a population counts as dead (fraction of the
+/// budding mass).
+const EXTINCT_FRACTION: f32 = 0.3;
+
+/// Upkeep multiplier for `mass` living matter in an `n`³ world.
+pub fn crowd_factor(mass: f32, capacity: f32, n: u32) -> f32 {
+    if capacity <= 0.0 {
+        return 1.0;
+    }
+    let cap = capacity * (n as f32 / 64.0).powi(3);
+    1.0 + (mass / cap).powi(2)
 }
 
 /// Small deterministic RNG for seeding.
@@ -72,6 +90,8 @@ impl World {
             traits: TraitRanges::default(),
             rng: Rng::new(0x5EED),
             seed: 1,
+            population_seen: false,
+            reseed: false,
         }
     }
 
@@ -156,6 +176,15 @@ impl World {
         }
         queue.submit([enc.finish()]);
         self.tracker.reset();
+        self.population_seen = false;
+        self.reseed = false;
+    }
+
+    /// Forget the population (after clearing the world): keep-alive stays quiet
+    /// until creatures are seen again.
+    pub fn forget_population(&mut self) {
+        self.population_seen = false;
+        self.reseed = false;
     }
 
     /// A founder genome drawn from the current trait ranges.
@@ -239,6 +268,18 @@ impl World {
         let n = self.n();
         let flow = self.sim.flow.is_some();
         self.tracker.update(data, m, f, n, generation, flow);
+        if let Some(fl) = self.sim.flow.as_mut() {
+            let eco = &fl.eco;
+            let mass: f32 = self.tracker.creatures.iter().map(|c| c.mass).sum();
+            fl.crowd = if eco.enabled { crowd_factor(mass, eco.capacity, n) } else { 1.0 };
+            let alive = mass >= EXTINCT_FRACTION * eco.bud_mass.max(100.0);
+            if alive {
+                self.population_seen = true;
+            } else if self.population_seen && eco.enabled && eco.keep_alive {
+                self.population_seen = false;
+                self.reseed = true;
+            }
+        }
         match &self.sim.flow {
             Some(fl) => {
                 let (eco, params) = (fl.eco.clone(), fl.params.clone());
@@ -246,6 +287,21 @@ impl World {
             }
             None => vec![],
         }
+    }
+
+    /// Seed new founders if the population died out (keep-alive). Returns
+    /// whether it did.
+    pub fn maintain(&mut self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder) -> bool {
+        if !std::mem::take(&mut self.reseed) || !self.is_flow() {
+            return false;
+        }
+        let init = self
+            .current
+            .as_ref()
+            .and_then(|p| p.init.clone())
+            .unwrap_or(SoupInit { blobs: 8, blob_radius: 1.25, density: 0.8, traits: None });
+        self.seed_soup(device, enc, &init);
+        true
     }
 
     /// Run reproduction operations on the GPU.
@@ -427,4 +483,18 @@ struct SaveHeader {
 
 fn dequantize(b: &[u8]) -> Vec<f32> {
     b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]) as f32 / 65535.0).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crowd_factor;
+
+    #[test]
+    fn crowd_factor_scales_with_mass_and_volume() {
+        assert_eq!(crowd_factor(5000.0, 0.0, 64), 1.0);
+        assert!((crowd_factor(0.0, 6000.0, 64) - 1.0).abs() < 1e-6);
+        assert!((crowd_factor(6000.0, 6000.0, 64) - 2.0).abs() < 1e-6);
+        // capacity is per 64³: a 128³ world holds 8x the mass at the same crowding
+        assert!((crowd_factor(48000.0, 6000.0, 128) - 2.0).abs() < 1e-5);
+    }
 }

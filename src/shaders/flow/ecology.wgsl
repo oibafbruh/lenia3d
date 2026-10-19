@@ -54,7 +54,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3
             m.x += eat;
         }
         // metabolism
-        let upkeep = (fp.meta_base + fp.meta_trait * (eye + abs(ear) + voice + mouth + claw)) * (1.0 + fp.toxicity * max(-fe, 0.0));
+        let upkeep = (fp.meta_base + fp.meta_trait * (eye + abs(ear) + voice + mouth + claw)) * (1.0 + fp.toxicity * max(-fe, 0.0)) * fp.crowd;
         let dec = min(m, upkeep * m * dt);
         m -= dec;
         f += fp.recycle * (dec.x + dec.y + dec.z);
