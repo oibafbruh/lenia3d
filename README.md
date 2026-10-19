@@ -69,13 +69,24 @@ lenia3d --bench                         # simulation speed at 64³..512³
 lenia3d --size 256 --preset Comet       # start with a given world size / preset
 lenia3d --screenshot out.png --preset Comet --steps 300 --mode glow
 lenia3d --list-presets
+lenia3d --check --chan-file animals3D.json   # verify every preset/species stays alive
 ```
+
+When you launch the app it starts with the *Tadpole Sea* soup at 128³.
+
+* Load a creature: pick one in **Creatures** and press **Load into world**, or double-click
+  its name.
+* Explore new rules: use **Mutate** / **Random rule**, then press **Soup**.
+
+Bert Chan's species download with one click. 33 of his 36 species are stable in this
+engine. His sheet/rod "membrane" species span the periodic world, so they load into an
+exact 64³ world automatically.
 
 ## How it works
 
 Each simulation step does the following:
 
-1. Packs channel pairs into complex fields and FFTs them (radix-2 Stockham-style
+1. Packs channel pairs into complex fields and FFTs them (radix-2 Cooley-Tukey
    passes in workgroup memory).
 2. Multiplies by the precomputed kernel spectra. Two kernels share one complex
    inverse FFT, because Lenia kernels are radially symmetric and so have real

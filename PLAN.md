@@ -47,7 +47,7 @@ so a game engine adds weight without helping with the hard part.
 
 **Performance design**
 
-- A custom FFT written as WGSL compute shaders. It is shared-memory Stockham, one workgroup
+- A custom FFT written as WGSL compute shaders. It is shared-memory radix-2, one workgroup
   per line, with coalesced tiles for the y and z axes.
 - Two real fields are packed into one complex FFT, both forward and inverse. Lenia kernels
   are radially symmetric, so their spectra are real, and packing halves the number of FFTs.
