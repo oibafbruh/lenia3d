@@ -63,6 +63,13 @@ pub fn parse_animals(json: &str) -> Result<Vec<Preset>> {
         };
         let mut preset = Preset::from_pattern(&title, &format!("Bert Chan, {family}"), &rule, &pat);
         preset.kind = "chan".into();
+        // Sheets and rods span the whole periodic world along some axis: they
+        // only survive in a world of exactly that size.
+        let max_dim = pat.dims.iter().copied().max().unwrap_or(0);
+        if max_dim >= 64 && max_dim.is_power_of_two() {
+            preset.world_size = Some(max_dim);
+            preset.description = format!("{} (spans the periodic world: needs exactly {max_dim}³)", preset.description);
+        }
         out.push(preset);
     }
     Ok(out)

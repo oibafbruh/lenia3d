@@ -108,6 +108,13 @@ pub struct Preset {
 }
 
 impl Preset {
+    /// World size this preset must run in (periodic structures spanning the world).
+    pub fn required_world_size(&self) -> Option<u32> {
+        let w = self.world_size?;
+        let pat = self.cells.as_ref()?;
+        pat.shape.contains(&w).then_some(w)
+    }
+
     pub fn pattern(&self) -> Option<Pattern> {
         let cells = self.cells.as_ref()?;
         let [z, y, x] = cells.shape;

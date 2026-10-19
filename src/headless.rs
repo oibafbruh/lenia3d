@@ -211,7 +211,7 @@ pub fn check_presets(opts: &Options) -> Result<()> {
     let mut ok_count = 0;
     for p in &presets {
         let need = p.pattern().map(|q| q.dims.iter().copied().max().unwrap_or(0) as f32 + 16.0).unwrap_or(0.0).max(2.0 * p.rule.R + 8.0);
-        let n = if need <= 64.0 { 64 } else { 128 };
+        let n = p.required_world_size().unwrap_or(if need <= 64.0 { 64 } else { 128 });
         let mut world = World::new(&g.device, n, p.rule.clone());
         world.load_preset(&g.device, &g.queue, p, 1.0);
         let m0: f64 = mass(&g, &world).iter().sum();

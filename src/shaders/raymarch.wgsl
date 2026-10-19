@@ -149,8 +149,9 @@ fn palette(x: f32) -> vec3<f32> {
 }
 
 fn channel_color(s: vec4<f32>) -> vec3<f32> {
-    let w = s.xyz;
-    let sum = max(w.x + w.y + w.z, 1e-4);
+    // cubed weights: the dominant channel's hue wins instead of mixing to gray
+    let w = s.xyz * s.xyz * s.xyz;
+    let sum = max(w.x + w.y + w.z, 1e-9);
     return (u.col0.rgb * w.x + u.col1.rgb * w.y + u.col2.rgb * w.z) / sum;
 }
 
@@ -368,8 +369,11 @@ fn march_organic(ro: vec3<f32>, rd: vec3<f32>, t0: f32, t1: f32, jitter: f32, en
                 m.trans = 0.0;
                 break;
             }
-            m.col += m.trans * mem_a * c;
-            m.trans *= 1.0 - mem_a;
+            // thin-film skin: clear face-on, opaque at grazing angles
+            let edge = pow(1.0 - abs(dot(n, rd)), 2.0);
+            let a = clamp(mem_a * (0.3 + 1.2 * edge), 0.0, 1.0);
+            m.col += m.trans * a * c;
+            m.trans *= 1.0 - a;
             inside = true;
         } else if (inside && d < iso) {
             inside = false;
@@ -379,7 +383,10 @@ fn march_organic(ro: vec3<f32>, rd: vec3<f32>, t0: f32, t1: f32, jitter: f32, en
                 let th = refine(ro, rd, prev_t, t, core, false);
                 let ph = ro + rd * th;
                 let n = surface_normal(ph, rd, false);
-                var base = u.core_col.rgb * mix(vec3<f32>(1.0), channel_color(sample_vol(ph)) * 1.4, 0.5);
+                var base = u.core_col.rgb;
+                if (u.ip.z > 1u) {
+                    base = channel_color(sample_vol(ph)) * 1.15;
+                }
                 if (has(FLAG_COLORMAP)) {
                     base = palette(0.55 + 0.45 * density_at(ph - n * vx * 2.0));
                 }
@@ -389,7 +396,12 @@ fn march_organic(ro: vec3<f32>, rd: vec3<f32>, t0: f32, t1: f32, jitter: f32, en
             }
             // jelly: absorption and faint inner glow
             let a = 1.0 - exp(-d * u.p0.w * u.p1.y * 0.05);
-            var glow = channel_color(s);
+            // cytoplasm: skin color at low density shading towards the core color
+            var core_tint = u.core_col.rgb;
+            if (u.ip.z > 1u) {
+                core_tint = channel_color(s) * 1.15;
+            }
+            var glow = mix(channel_color(s), core_tint, smoothstep(iso, core, d));
             if (has(FLAG_COLORMAP)) {
                 glow = palette(d);
             }

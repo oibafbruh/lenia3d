@@ -200,7 +200,12 @@ impl State {
                 let l = name.to_lowercase();
                 ui.presets.iter().position(|p| p.name.to_lowercase().contains(&l)).unwrap_or(0)
             }
-            None => ui.presets.iter().position(|p| p.kind == "soup").unwrap_or(0),
+            None => ui
+                .presets
+                .iter()
+                .position(|p| p.name == "Tadpole Sea")
+                .or_else(|| ui.presets.iter().position(|p| p.kind == "soup"))
+                .unwrap_or(0),
         };
         ui.selected = start_idx;
         let n = if size_given { opts.size.min(max_n) } else { 128.min(max_n) };
@@ -475,10 +480,17 @@ impl State {
             Action::LoadPreset(i) => {
                 if let Some(p) = self.ui.presets.get(i).cloned() {
                     self.ui.selected = i;
+                    if let Some(w) = p.required_world_size() {
+                        // periodic sheet/rod: exact world size, no scaling
+                        self.ui.scale = 1.0;
+                        if self.world.n() != w && w <= self.max_n {
+                            self.world.resize(device, w);
+                        }
+                    }
                     // creatures need room: grow the world if it is too small for the pattern
                     let need = p.pattern().map(|q| q.dims.iter().copied().max().unwrap_or(0) as f32 * self.ui.scale).unwrap_or(0.0);
                     let need = need.max(p.rule.R * self.ui.scale * 2.0 + 8.0);
-                    if (self.world.n() as f32) < need {
+                    if p.required_world_size().is_none() && (self.world.n() as f32) < need {
                         let mut n = self.world.n();
                         while (n as f32) < need && n < self.max_n {
                             n *= 2;

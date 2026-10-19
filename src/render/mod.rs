@@ -64,26 +64,38 @@ pub struct RenderSettings {
     pub render_scale: f32,
 }
 
+/// sRGB 0-255 color to linear RGB.
+pub fn srgb(r: u8, g: u8, b: u8) -> [f32; 3] {
+    [r, g, b].map(|c| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    })
+}
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
             mode: RenderMode::Organic,
             iso: 0.12,
             core_iso: 0.55,
-            membrane_opacity: 0.45,
-            density_gain: 6.0,
+            membrane_opacity: 0.6,
+            density_gain: 3.0,
             emission: 1.5,
             step_scale: 0.5,
-            channel_colors: [[0.25, 0.85, 0.75], [1.0, 0.45, 0.35], [0.45, 0.55, 1.0]],
-            core_color: [1.0, 0.62, 0.38],
+            channel_colors: [srgb(40, 210, 190), srgb(255, 105, 70), srgb(110, 120, 255)],
+            core_color: srgb(255, 150, 40),
             colormap: false,
-            exposure: 1.1,
+            exposure: 0.95,
             bloom: 0.06,
             vignette: 0.35,
             light_azimuth: 0.9,
             light_elevation: 0.85,
-            light_intensity: 1.2,
-            sss: 0.6,
+            light_intensity: 1.05,
+            sss: 0.5,
             shadow: 0.9,
             ao: 1.0,
             floor: true,
