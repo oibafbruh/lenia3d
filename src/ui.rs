@@ -98,13 +98,14 @@ pub struct UiState {
     pub downloading: bool,
     pub status: String,
     pub status_time: f64,
+    pub rng_state: u64,
 }
 
 impl UiState {
     pub fn new(presets: Vec<Preset>) -> Self {
         Self {
             running: true,
-            steps_per_frame: 1,
+            steps_per_frame: 2,
             settings: RenderSettings::default(),
             rule: LeniaParams::default(),
             presets,
@@ -124,6 +125,7 @@ impl UiState {
             downloading: false,
             status: String::new(),
             status_time: 0.0,
+            rng_state: 0x2545F4914F6CDD1D,
         }
     }
 
@@ -372,12 +374,67 @@ fn rule_section(ui: &mut egui::Ui, st: &mut UiState, info: &FrameInfo) {
                 rule.kernels.remove(i);
             }
         }
-        if rule.kernels.len() < MAX_KERNELS && ui.button("+ Add kernel").clicked() {
-            let mut k = rule.kernels.last().cloned().unwrap_or_default();
-            k.m = (k.m * 1.1).min(1.0);
-            rule.kernels.push(k);
-        }
+        ui.horizontal(|ui| {
+            if rule.kernels.len() < MAX_KERNELS && ui.button("+ Add kernel").clicked() {
+                let mut k = rule.kernels.last().cloned().unwrap_or_default();
+                k.m = (k.m * 1.1).min(1.0);
+                rule.kernels.push(k);
+            }
+            if ui.button("Mutate").on_hover_text("Nudge every growth parameter by a few percent").clicked() {
+                st.rng_state = mutate_rule(rule, st.rng_state, 0.04);
+            }
+            if ui.button("Random rule").on_hover_text("A new random rule with the same channels (then press Soup)").clicked() {
+                st.rng_state = randomize_rule(rule, st.rng_state);
+            }
+        });
     });
+}
+
+fn next_rand(state: &mut u64) -> f32 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    ((*state >> 40) as f32) / (1u64 << 24) as f32
+}
+
+fn mutate_rule(rule: &mut LeniaParams, mut state: u64, amount: f32) -> u64 {
+    for k in &mut rule.kernels {
+        let mut j = |v: &mut f32, lo: f32, hi: f32| {
+            *v = (*v * (1.0 + (next_rand(&mut state) * 2.0 - 1.0) * amount)).clamp(lo, hi);
+        };
+        j(&mut k.m, 0.01, 0.6);
+        j(&mut k.s, 0.001, 0.2);
+        j(&mut k.h, 0.0, 2.0);
+        j(&mut k.r, 0.1, 2.0);
+        for b in &mut k.b {
+            j(b, 0.0, 1.0);
+        }
+    }
+    state
+}
+
+fn randomize_rule(rule: &mut LeniaParams, mut state: u64) -> u64 {
+    let nch = rule.channels;
+    let count = (nch * nch).clamp(1, 6) + (next_rand(&mut state) * 2.0) as usize;
+    rule.kernels = (0..count)
+        .map(|i| {
+            let mut r = || next_rand(&mut state);
+            let nb = 1 + (r() * 3.0) as usize;
+            let m = 0.1 + r() * 0.25;
+            KernelParams {
+                src: if nch > 1 { i % nch } else { 0 },
+                dst: if nch > 1 { (i / nch) % nch } else { 0 },
+                r: 0.4 + r() * 0.6,
+                b: (0..nb).map(|j| if j == 0 { 1.0 } else { (r() * 100.0).round() / 100.0 }).collect(),
+                m,
+                s: m * (0.08 + r() * 0.12),
+                h: 0.3 + r() * 0.7,
+                kn: 1,
+                gn: 1,
+            }
+        })
+        .collect();
+    state
 }
 
 fn kernel_editor(ui: &mut egui::Ui, k: &mut KernelParams, nch: usize, id: usize) {
@@ -567,6 +624,7 @@ fn render_section(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Action>
     ui.add(egui::Slider::new(&mut s.bloom, 0.0..=0.5).text("bloom"));
     ui.add(egui::Slider::new(&mut s.vignette, 0.0..=1.0).text("vignette"));
     ui.add(egui::Slider::new(&mut s.step_scale, 0.25..=1.5).text("ray step (quality)")).on_hover_text("Smaller = finer, slower.");
+    ui.add(egui::Slider::new(&mut s.render_scale, 0.25..=1.0).text("render scale")).on_hover_text("Render the 3D view at lower resolution for speed (useful on 4K screens).");
     ui.horizontal(|ui| {
         ui.checkbox(&mut s.floor, "floor");
         ui.checkbox(&mut s.show_box, "box");

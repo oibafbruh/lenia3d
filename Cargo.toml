@@ -31,10 +31,6 @@ log = "0.4"
 env_logger = "0.11"
 anyhow = "1"
 
-# DX12 fallback: statically linked DXC compiles shaders much faster than FXC.
-[target.'cfg(all(windows, target_env = "msvc", not(target_arch = "aarch64")))'.dependencies]
-wgpu = { version = "30", features = ["static-dxc"] }
-
 [dev-dependencies]
 rustfft = "6"
 

@@ -701,9 +701,13 @@ impl State {
             let vals: &[f32] = bytemuck::cast_slice(&view);
             crate::sim::stats_from_partials(vals, r.groups, n)
         };
-        let fresh = r.roll_at_request == self.roll_count;
+        let layout = self.world.sim.layout_id() ^ ((n as u64) << 48);
+        let fresh = r.roll_at_request == self.roll_count && r.layout == layout;
         r.staging.unmap();
         r.state.store(0, Ordering::Release);
+        if r.layout != layout {
+            return;
+        }
         self.mass = stats.iter().map(|s| s.mass).collect();
         // follow: roll the periodic world so the center of mass sits in the middle
         if self.ui.follow && fresh && !self.world.has_walls && self.pending_roll.is_none() {

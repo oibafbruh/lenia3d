@@ -29,25 +29,44 @@ jobs:
         env:
           WGPU_BACKEND: dx12
         run: cargo test --release --test gpu_sim -- --nocapture
-      - name: Headless render smoke test (WARP)
+      - name: Simulation smoke test (WARP)
         continue-on-error: true
         timeout-minutes: 15
         env:
           WGPU_BACKEND: dx12
         run: |
           ./target/release/lenia3d.exe --list-presets
-          ./target/release/lenia3d.exe --size 64 --steps 30 --screenshot ci-windows.png --resolution 640x360
+          ./target/release/lenia3d.exe --bench --steps 10
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/lenia3d.exe dist/
           Copy-Item README.md dist/
-          if (Test-Path ci-windows.png) { Copy-Item ci-windows.png dist/ }
       - uses: actions/upload-artifact@v4
         with:
           name: lenia3d-windows
           path: dist/
+
+  # Slow: WARP is a CPU rasterizer and FXC compiles the raymarcher slowly.
+  # Separate job so it never delays the Windows artifact.
+  windows-dx12-render:
+    needs: windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lenia3d-windows
+      - name: Headless render on WARP (DX12)
+        env:
+          WGPU_BACKEND: dx12
+        run: ./lenia3d.exe --size 64 --steps 20 --screenshot ci-windows.png --resolution 480x270
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-windows-render
+          path: ci-windows.png
 
   linux:
     runs-on: ubuntu-latest

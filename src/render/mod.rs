@@ -60,6 +60,8 @@ pub struct RenderSettings {
     pub bg_bottom: [f32; 3],
     /// Smooth the volume (3x3x3 filter) before rendering.
     pub smooth: bool,
+    /// Internal resolution relative to the window (upscaled when < 1).
+    pub render_scale: f32,
 }
 
 impl Default for RenderSettings {
@@ -93,6 +95,7 @@ impl Default for RenderSettings {
             bg_top: [0.035, 0.045, 0.07],
             bg_bottom: [0.012, 0.012, 0.018],
             smooth: true,
+            render_scale: 1.0,
         }
     }
 }
@@ -550,7 +553,9 @@ impl Renderer {
         overlay: &Overlay,
         time: f32,
     ) {
-        self.ensure_targets(device, queue, size.0, size.1);
+        let scale = settings.render_scale.clamp(0.25, 1.0);
+        let internal = (((size.0 as f32) * scale).round() as u32, ((size.1 as f32) * scale).round() as u32);
+        self.ensure_targets(device, queue, internal.0, internal.1);
         let Some(vol) = self.volume.as_ref() else { return };
         let t = self.targets.as_ref().unwrap();
         let aspect = t.width as f32 / t.height as f32;
