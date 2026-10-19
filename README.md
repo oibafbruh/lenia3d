@@ -17,13 +17,17 @@ multiple kernels.
   creatures.
 * Built-in creatures, plus one-click download of Bert Chan's 36 published
   3D species.
+* **Evolution mode** (3D Flow Lenia): every cell carries a genome. Creatures
+  grow eyes, mouths, claws and antennae, sing, eat, bud, mate, fight and
+  mutate. You can hear them.
 
 ## Run it
 
 **Windows:**
 
-1. Download the `lenia3d-windows` artifact from the latest
-   [Actions run](../../actions).
+1. Open the latest green **build** run under [Actions](../../actions) and
+   download the `lenia3d-windows` artifact at the bottom of the run page. You must be
+   signed in to GitHub to download it.
 2. Unzip it and run `lenia3d.exe`.
 
 You need an up-to-date GPU driver, but no other installs.
@@ -58,6 +62,9 @@ The app picks the discrete GPU and prefers Vulkan. To force a backend, set the
 | Tab | hide panels |
 | F11 / F12 | fullscreen / screenshot (saved to `screenshots/`) |
 | H | help |
+| 8 9 0 | Evolution mode: food, toxin, founder brushes |
+| Click a creature | Evolution mode: inspect its genes and organs; follow, clone or remove it |
+| P / V | Evolution mode: population window / sound on-off |
 
 Drop a `.l3d` world file or a preset / `animals3D.json` file onto the window
 to open it.
@@ -81,6 +88,27 @@ When you launch the app it starts with the *Tadpole Sea* soup at 128³.
 Bert Chan's species download with one click. 33 of his 36 species are stable in this
 engine. His sheet/rod "membrane" species span the periodic world, so they load into an
 exact 64³ world automatically.
+
+## Evolution mode
+
+Switch to **Evolution** at the top of the left panel. It starts with the *Grazing Drift*
+ecosystem. The physics is mass-conserving Flow Lenia, and every cell carries a
+16-gene genome. The genes cover the update rule weights, the organs (eye, ear, voice,
+mouth, claw), voice pitch and timbre, an alarm call, and color.
+
+* **Senses.** Eyes steer towards food. Ears steer towards or away from voices in the
+  pitch band they are tuned to. Claws attack foreign matter.
+* **Ecology.** Mouths eat the green food field. Bodies pay metabolism, and lost matter
+  becomes food again.
+* **Reproduction.** Well-fed creatures bud mutated children. Compatible creatures that
+  touch mate and produce a crossover child. Incompatible ones fight: foreign matter
+  that flows into a body is destroyed by its claws.
+* **Sound.** Each creature sings on a pentatonic scale with its own pitch and timbre.
+  Sound is panned by camera position, and you also hear births, buds and deaths.
+* **Building.** Build walls with the wall brush, or use **Islands** to split the world.
+  Isolated populations drift apart into different "languages" (pitch groups).
+
+See `docs/flow_lenia.md` for the math.
 
 ## How it works
 
