@@ -1,0 +1,5 @@
+/target
+*.png
+!docs/*.png
+/worlds
+__pycache__/

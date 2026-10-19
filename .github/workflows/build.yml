@@ -1,0 +1,65 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Unit tests
+        run: cargo test --release --lib
+      - name: GPU tests (WARP software DX12)
+        continue-on-error: true
+        env:
+          WGPU_BACKEND: dx12
+        run: cargo test --release --test gpu_sim -- --nocapture
+      - name: Headless render smoke test (WARP)
+        continue-on-error: true
+        env:
+          WGPU_BACKEND: dx12
+        run: |
+          ./target/release/lenia3d.exe --list-presets
+          ./target/release/lenia3d.exe --size 64 --steps 30 --screenshot ci-windows.png --resolution 960x540
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/lenia3d.exe dist/
+          Copy-Item README.md dist/
+          if (Test-Path ci-windows.png) { Copy-Item ci-windows.png dist/ }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lenia3d-windows
+          path: dist/
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install software Vulkan (lavapipe)
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libxkbcommon-x11-0
+      - name: Tests (including GPU tests on lavapipe)
+        run: cargo test --release -- --nocapture
+      - name: Build
+        run: cargo build --release
+      - name: Headless render smoke test
+        run: ./target/release/lenia3d --size 64 --steps 30 --screenshot ci-linux.png --resolution 960x540
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lenia3d-linux
+          path: |
+            target/release/lenia3d
+            ci-linux.png
