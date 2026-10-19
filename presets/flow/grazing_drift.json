@@ -1,6 +1,6 @@
 {
   "name": "Grazing Drift",
-  "description": "Shy singing grazers drift through a sparse food field, gorge, bud and slowly starve again: a boom-and-bust population of 5-10 creatures.",
+  "description": "Shy singing grazers drift through a sparse food field, eat, bud and mate. A carrying capacity keeps the population at roughly 7-16 creatures.",
   "kind": "ecosystem",
   "R": 10.0,
   "T": 5.0,
@@ -142,13 +142,15 @@
     "meta_trait": 0.0005,
     "toxicity": 2.0,
     "recycle": 0.3,
-    "regrow": 0.01,
+    "regrow": 0.02,
     "fertility": 0.3,
     "mutation_rate": 0.0,
     "mutation_size": 0.05,
     "bud_mass": 900.0,
     "bud_age": 300,
-    "bud_mutation": 0.05
+    "bud_mutation": 0.05,
+    "capacity": 6000.0,
+    "keep_alive": true
   },
   "init": {
     "blobs": 8,
