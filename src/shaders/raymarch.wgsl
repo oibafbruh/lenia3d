@@ -17,6 +17,7 @@ struct Uniforms {
     p2: vec4<f32>,          // sss, shadow strength, ao strength, floor y
     ip: vec4<u32>,          // mode, n, channels, flags
     screen: vec4<f32>,      // width, height, frame, pixel angle
+    p3: vec4<f32>,          // floor grid offset x, z (follow mode scrolling)
 };
 
 const FLAG_FLOOR: u32 = 1u;
@@ -472,7 +473,7 @@ fn background(ro: vec3<f32>, rd: vec3<f32>) -> vec3<f32> {
             let p = ro + rd * tf;
             let px = tf * u.screen.w;
             // grid lines every 1/4 world unit with pixel-width antialiasing
-            let g = abs(fract(p.xz * 4.0 + 0.5) - 0.5) / max(px * 4.0, 1e-4);
+            let g = abs(fract((p.xz - u.p3.xy) * 4.0 + 0.5) - 0.5) / max(px * 4.0, 1e-4);
             let line = 1.0 - clamp(min(g.x, g.y), 0.0, 1.0);
             let inside = step(abs(p.x), 1.0) * step(abs(p.z), 1.0);
             let sh = shadow(p);

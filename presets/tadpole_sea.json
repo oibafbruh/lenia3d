@@ -1,0 +1,62 @@
+{
+  "name": "Tadpole Sea",
+  "description": "Two-channel soup. Noisy blobs hatch into restless two-tone tadpoles that swim, collide, merge and split without ever settling.",
+  "R": 10.0,
+  "T": 10.0,
+  "channels": 2,
+  "kernels": [
+    {
+      "src": 0,
+      "dst": 0,
+      "r": 1.0,
+      "b": [
+        1.0,
+        0.37,
+        1.0
+      ],
+      "m": 0.082,
+      "s": 0.00868,
+      "h": 0.62,
+      "kn": 1,
+      "gn": 1
+    },
+    {
+      "src": 0,
+      "dst": 1,
+      "r": 0.45,
+      "b": [
+        0.16,
+        0.18,
+        1.0
+      ],
+      "m": 0.28,
+      "s": 0.04814,
+      "h": 1.0,
+      "kn": 1,
+      "gn": 1
+    },
+    {
+      "src": 1,
+      "dst": 0,
+      "r": 0.78,
+      "b": [
+        0.49,
+        1.0,
+        1.0
+      ],
+      "m": 0.137,
+      "s": 0.02371,
+      "h": 0.38,
+      "kn": 1,
+      "gn": 1
+    }
+  ],
+  "cells": null,
+  "world_size": 64,
+  "kind": "soup",
+  "init": {
+    "blobs": 12,
+    "blob_radius": 1.21,
+    "density": 0.78
+  }
+}

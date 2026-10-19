@@ -147,6 +147,8 @@ pub struct Overlay {
     pub plane_y: Option<f32>,
     /// Brush sphere (world center, world radius), if shown.
     pub brush: Option<(Vec3, f32)>,
+    /// Floor grid offset (x, z) so the ground scrolls in follow mode.
+    pub floor_offset: [f32; 2],
 }
 
 #[repr(C)]
@@ -167,6 +169,7 @@ struct Uniforms {
     p2: [f32; 4],
     ip: [u32; 4],
     screen: [f32; 4],
+    p3: [f32; 4],
 }
 
 #[repr(C)]
@@ -593,6 +596,7 @@ impl Renderer {
             p2: [settings.sss, settings.shadow, settings.ao, -1.02],
             ip: [settings.mode as u32, vol.n, vol.nch, flags],
             screen: [t.width as f32, t.height as f32, (self.frame % 64) as f32, pixel_angle],
+            p3: [overlay.floor_offset[0], overlay.floor_offset[1], 0.0, 0.0],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         queue.write_buffer(

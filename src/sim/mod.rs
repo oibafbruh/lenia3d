@@ -97,7 +97,64 @@ struct StampParams {
 struct ReduceParams {
     total: u32,
     out_offset: u32,
-    _p: [u32; 2],
+    n: u32,
+    _p: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RollParams {
+    n: u32,
+    _p: [u32; 3],
+    shift: [i32; 3],
+    _p3: u32,
+}
+
+/// Per-channel statistics from the moments reduction.
+#[derive(Clone, Debug, Default)]
+pub struct ChannelStats {
+    pub mass: f64,
+    /// Periodic center of mass in cell coordinates (x, y, z), if any mass.
+    pub center: Option<[f64; 3]>,
+}
+
+/// Combine the 8-float partial sums of each workgroup into per-channel stats.
+pub fn stats_from_partials(vals: &[f32], groups: u32, n: u32) -> Vec<ChannelStats> {
+    vals.chunks(groups as usize * 8)
+        .map(|ch| {
+            let mut s = [0f64; 7];
+            for g in ch.chunks_exact(8) {
+                for k in 0..7 {
+                    s[k] += g[k] as f64;
+                }
+            }
+            let center = (s[0] > 1e-6).then(|| {
+                let ang = |c: f64, si: f64| {
+                    let a = si.atan2(c) / std::f64::consts::TAU * n as f64;
+                    a.rem_euclid(n as f64)
+                };
+                [ang(s[1], s[2]), ang(s[3], s[4]), ang(s[5], s[6])]
+            });
+            ChannelStats { mass: s[0], center }
+        })
+        .collect()
+}
+
+/// Mass-weighted periodic center over all channels.
+pub fn combined_center(stats: &[ChannelStats], n: u32) -> Option<[f64; 3]> {
+    let mut acc = [(0f64, 0f64); 3];
+    let mut total = 0.0;
+    for s in stats {
+        if let Some(c) = s.center {
+            for k in 0..3 {
+                let a = c[k] / n as f64 * std::f64::consts::TAU;
+                acc[k].0 += s.mass * a.cos();
+                acc[k].1 += s.mass * a.sin();
+            }
+            total += s.mass;
+        }
+    }
+    (total > 1e-6).then(|| acc.map(|(c, s)| (s.atan2(c) / std::f64::consts::TAU * n as f64).rem_euclid(n as f64)))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +164,8 @@ pub enum BrushMode {
     Erase = 2,
     Wall = 3,
     Unwall = 4,
+    /// Soup seeding blob (see `World::seed_soup`); strength = fill probability.
+    Seed = 5,
 }
 
 struct Pipelines {
@@ -117,6 +176,7 @@ struct Pipelines {
     brush: wgpu::ComputePipeline,
     stamp: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
+    roll: wgpu::ComputePipeline,
 }
 
 fn compute_pipeline(device: &wgpu::Device, label: &str, src: &str) -> wgpu::ComputePipeline {
@@ -144,6 +204,7 @@ impl Pipelines {
             brush: compute_pipeline(device, "brush", include_str!("../shaders/brush.wgsl")),
             stamp: compute_pipeline(device, "stamp", include_str!("../shaders/stamp.wgsl")),
             reduce: compute_pipeline(device, "reduce", include_str!("../shaders/reduce.wgsl")),
+            roll: compute_pipeline(device, "roll", include_str!("../shaders/roll.wgsl")),
         }
     }
 }
@@ -235,7 +296,7 @@ impl Simulation {
         let accum: Vec<_> = (0..params.channels).map(|_| field_buffer(device, "accum", cells * 4)).collect();
         let wall = field_buffer(device, "wall", cells * 4);
         let reduce_groups = (cells as u32).div_ceil(4096);
-        let reduce_out = field_buffer(device, "reduce", (reduce_groups as u64 * 4 * 3).max(16));
+        let reduce_out = field_buffer(device, "reduce", (reduce_groups as u64 * 32 * 3).max(32));
         let fft = Fft::new(device, n);
         let pipes = Pipelines::new(device);
         let mut sim = Self {
@@ -429,7 +490,7 @@ impl Simulation {
             .map(|(c, buf)| {
                 let u = uniform(
                     device,
-                    &ReduceParams { total, out_offset: c as u32 * self.reduce_groups, _p: [0; 2] },
+                    &ReduceParams { total, out_offset: c as u32 * self.reduce_groups, n, _p: 0 },
                 );
                 bind_group(device, &pipes.reduce, &[buf, &self.reduce_out, &u])
             })
@@ -474,7 +535,27 @@ impl Simulation {
         self.time += steps as f64 * self.params.dt() as f64;
     }
 
-    /// Record a pass computing per-channel mass partial sums into `reduce_out`.
+    /// Periodically translate the whole world (channels and walls) by `shift` cells.
+    pub fn encode_roll(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, shift: [i32; 3]) {
+        let n = self.n;
+        let bytes = self.cells() as u64 * 4;
+        let u = uniform(device, &RollParams { n, _p: [0; 3], shift, _p3: 0 });
+        let groups = n.div_ceil(4);
+        let mut fields: Vec<&wgpu::Buffer> = self.channels.iter().collect();
+        fields.push(&self.wall);
+        let tmp = &self.accum[0];
+        for f in fields {
+            encoder.copy_buffer_to_buffer(f, 0, tmp, 0, bytes);
+            let bg = bind_group(device, &self.pipes.roll, &[tmp, f, &u]);
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.pipes.roll);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(groups, groups, groups);
+        }
+    }
+
+    /// Record a pass computing per-channel partial sums (8 floats per
+    /// workgroup: mass and periodic moments) into `reduce_out`.
     pub fn encode_mass(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("mass"), timestamp_writes: None });
         pass.set_pipeline(&self.pipes.reduce);
@@ -485,8 +566,9 @@ impl Simulation {
         }
     }
 
-    pub fn mass_buffer(&self) -> (&wgpu::Buffer, u32) {
-        (&self.reduce_out, self.reduce_groups)
+    /// The partial-sums buffer, workgroups per channel, and bytes used.
+    pub fn mass_buffer(&self) -> (&wgpu::Buffer, u32, u64) {
+        (&self.reduce_out, self.reduce_groups, self.reduce_groups as u64 * 32 * self.channels.len() as u64)
     }
 
     pub fn clear(&mut self, encoder: &mut wgpu::CommandEncoder, walls_too: bool) {

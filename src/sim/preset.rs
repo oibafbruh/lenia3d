@@ -190,9 +190,9 @@ pub fn base64_encode(data: &[u8]) -> String {
 
 include!(concat!(env!("OUT_DIR"), "/builtin_presets.rs"));
 
-/// Presets embedded in the binary from the `presets/` folder.
+/// Presets embedded in the binary from the `presets/` folder (never empty).
 pub fn builtin_presets() -> Vec<Preset> {
-    BUILTIN_PRESETS
+    let mut v: Vec<Preset> = BUILTIN_PRESETS
         .iter()
         .filter_map(|(file, src)| match serde_json::from_str::<Preset>(src) {
             Ok(p) => Some(p),
@@ -201,7 +201,24 @@ pub fn builtin_presets() -> Vec<Preset> {
                 None
             }
         })
-        .collect()
+        .collect();
+    if v.is_empty() {
+        v.push(fallback_preset());
+    }
+    v
+}
+
+/// Simple single-kernel soup, used if no presets are embedded.
+pub fn fallback_preset() -> Preset {
+    Preset {
+        name: "Primordial soup".into(),
+        description: "Random blobs under a classic single-kernel rule.".into(),
+        rule: super::params::LeniaParams::default(),
+        cells: None,
+        init: Some(SoupInit { blobs: 12, blob_radius: 1.0, density: 0.5 }),
+        world_size: None,
+        kind: "soup".into(),
+    }
 }
 
 #[cfg(test)]

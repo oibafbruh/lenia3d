@@ -8,6 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -21,16 +25,18 @@ jobs:
         run: cargo test --release --lib
       - name: GPU tests (WARP software DX12)
         continue-on-error: true
+        timeout-minutes: 15
         env:
           WGPU_BACKEND: dx12
         run: cargo test --release --test gpu_sim -- --nocapture
       - name: Headless render smoke test (WARP)
         continue-on-error: true
+        timeout-minutes: 15
         env:
           WGPU_BACKEND: dx12
         run: |
           ./target/release/lenia3d.exe --list-presets
-          ./target/release/lenia3d.exe --size 64 --steps 30 --screenshot ci-windows.png --resolution 960x540
+          ./target/release/lenia3d.exe --size 64 --steps 30 --screenshot ci-windows.png --resolution 640x360
       - name: Package
         shell: pwsh
         run: |

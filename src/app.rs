@@ -71,6 +71,8 @@ struct MassReader {
     groups: u32,
     channels: usize,
     layout: u64,
+    /// `roll_count` when the request was recorded (stale centers are ignored).
+    roll_at_request: u64,
     state: Arc<AtomicU8>, // 0 idle, 1 in flight, 2 ready
 }
 
@@ -114,6 +116,9 @@ struct State {
     gpu_errors: Arc<Mutex<Vec<String>>>,
     chan_rx: Option<mpsc::Receiver<Result<String>>>,
     seed_rng: Rng,
+    roll_count: u64,
+    pending_roll: Option<[i32; 3]>,
+    floor_offset: Vec2,
 }
 
 fn data_dir() -> PathBuf {
@@ -187,9 +192,6 @@ impl State {
                 chan_loaded = true;
             }
         }
-        if presets.is_empty() {
-            presets.push(fallback_soup());
-        }
         let max_n = gpu::Gpu::max_grid_size(&device);
         let mut ui = UiState::new(presets);
         ui.chan_loaded = chan_loaded;
@@ -206,9 +208,14 @@ impl State {
         let p = ui.presets[start_idx].clone();
         world.load_preset(&device, &queue, &p, 1.0);
         ui.rule = world.sim.params().clone();
+        ui.follow = p.pattern().is_some();
         ui.set_status(format!("Loaded \"{}\"", p.name), 0.0);
 
         let mut camera = OrbitCamera::default();
+        if let Some(pat) = p.pattern() {
+            let r = pat.dims.iter().copied().max().unwrap_or(1) as f32 / n as f32 * 2.0;
+            camera.frame_box(Vec3::ZERO, r.max(0.25));
+        }
         camera.snap();
         let now = Instant::now();
         Ok(Self {
@@ -238,6 +245,9 @@ impl State {
             gpu_errors,
             chan_rx: None,
             seed_rng: Rng::new(12345),
+            roll_count: 0,
+            pending_roll: None,
+            floor_offset: Vec2::ZERO,
         })
     }
 
@@ -478,6 +488,8 @@ impl State {
                     self.world.load_preset(device, queue, &p, self.ui.scale);
                     self.ui.rule = self.world.sim.params().clone();
                     self.ui.running = true;
+                    self.ui.follow = p.pattern().is_some();
+                    self.frame_preset(&p);
                     self.ui.set_status(format!("Loaded \"{}\"", p.name), now);
                 }
             }
@@ -491,6 +503,7 @@ impl State {
                 queue.submit([enc.finish()]);
             }
             Action::Soup => {
+                self.ui.follow = false;
                 let mut enc = device.create_command_encoder(&Default::default());
                 self.world.sim.clear(&mut enc, false);
                 let init = crate::sim::preset::SoupInit { blobs: 10, blob_radius: 1.0, density: 0.5 };
@@ -549,6 +562,7 @@ impl State {
                 let mut enc = device.create_command_encoder(&Default::default());
                 enc.clear_buffer(&self.world.sim.wall, 0, None);
                 queue.submit([enc.finish()]);
+                self.world.has_walls = false;
             }
             Action::EncloseWalls => {
                 let n = self.world.n() as usize;
@@ -564,7 +578,8 @@ impl State {
                     }
                 }
                 self.world.sim.upload_wall(queue, &w);
-                self.ui.set_status("World enclosed by walls", now);
+                self.world.has_walls = true;
+                self.ui.set_status("World enclosed by walls (follow mode is paused while walls exist)", now);
             }
             Action::Pillars => {
                 let n = self.world.n() as f32;
@@ -580,9 +595,22 @@ impl State {
                     }
                 }
                 queue.submit([enc.finish()]);
+                self.world.has_walls = true;
             }
         }
         self.volume_dirty = true;
+    }
+
+    /// Point the camera at a freshly loaded creature (or the whole world for soups).
+    fn frame_preset(&mut self, p: &Preset) {
+        match p.pattern() {
+            Some(pat) => {
+                let cells = pat.dims.iter().copied().max().unwrap_or(1) as f32 * self.ui.scale;
+                let r = cells / self.world.n() as f32 * 2.0;
+                self.camera.frame_box(Vec3::ZERO, r.max(0.25));
+            }
+            None => self.camera.reset(),
+        }
     }
 
     fn screenshot(&mut self) -> Result<()> {
@@ -654,6 +682,9 @@ impl State {
             Tool::Wall => BrushMode::Wall,
             _ => BrushMode::Unwall,
         };
+        if tool == Tool::Wall {
+            self.world.has_walls = true;
+        }
         let seed = self.seed_rng.next_u32();
         self.world.sim.brush(&self.device, enc, mode, self.ui.brush_channel, center, r, self.ui.brush_strength, seed);
         self.volume_dirty = true;
@@ -664,13 +695,30 @@ impl State {
         if r.state.load(Ordering::Acquire) != 2 {
             return;
         }
-        {
+        let n = self.world.n();
+        let stats = {
             let view = r.staging.slice(..).get_mapped_range().expect("mapped");
             let vals: &[f32] = bytemuck::cast_slice(&view);
-            self.mass = vals.chunks(r.groups as usize).take(r.channels).map(|c| c.iter().map(|&v| v as f64).sum()).collect();
-        }
+            crate::sim::stats_from_partials(vals, r.groups, n)
+        };
+        let fresh = r.roll_at_request == self.roll_count;
         r.staging.unmap();
         r.state.store(0, Ordering::Release);
+        self.mass = stats.iter().map(|s| s.mass).collect();
+        // follow: roll the periodic world so the center of mass sits in the middle
+        if self.ui.follow && fresh && !self.world.has_walls && self.pending_roll.is_none() {
+            if let Some(c) = crate::sim::combined_center(&stats, n) {
+                let half = n as f64 / 2.0;
+                let shift = c.map(|v| {
+                    let d = (half - v).rem_euclid(n as f64);
+                    let d = if d >= half { d - n as f64 } else { d };
+                    d.round() as i32
+                });
+                if shift.iter().any(|d| d.abs() >= 1) {
+                    self.pending_roll = Some(shift);
+                }
+            }
+        }
     }
 
     fn frame(&mut self) -> Result<()> {
@@ -771,6 +819,14 @@ impl State {
         let view = frame.texture.create_view(&Default::default());
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
+        if let Some(shift) = self.pending_roll.take() {
+            self.world.sim.encode_roll(&self.device, &mut enc, shift);
+            self.roll_count += 1;
+            let cell = 2.0 / self.world.n() as f32;
+            let off = self.floor_offset + Vec2::new(shift[0] as f32, shift[2] as f32) * cell;
+            self.floor_offset = Vec2::new(off.x.rem_euclid(0.25), off.y.rem_euclid(0.25));
+            self.volume_dirty = true;
+        }
         self.handle_tools(&mut enc);
         if self.ui.running {
             let steps = self.ui.steps_per_frame;
@@ -784,10 +840,10 @@ impl State {
             self.steps_counter = (now_i, 0, self.steps_counter.2);
         }
 
-        // mass statistics every ~10 frames
+        // statistics (mass, center of mass) every few frames
         let mut mass_submitted = false;
-        if self.frame_index % 10 == 0 {
-            let (buf, groups) = self.world.sim.mass_buffer();
+        if self.frame_index % 3 == 0 {
+            let (buf, groups, bytes) = self.world.sim.mass_buffer();
             let channels = self.world.sim.channels.len();
             let layout = self.world.sim.layout_id() ^ ((self.world.n() as u64) << 48);
             let need_new = self.mass_reader.as_ref().is_none_or(|r| r.layout != layout || r.groups != groups || r.channels != channels);
@@ -795,21 +851,24 @@ impl State {
                 self.mass_reader = Some(MassReader {
                     staging: self.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("mass staging"),
-                        size: groups as u64 * 4 * channels as u64,
+                        size: bytes,
                         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }),
                     groups,
                     channels,
                     layout,
+                    roll_at_request: 0,
                     state: Arc::new(AtomicU8::new(0)),
                 });
             }
-            if let Some(r) = &self.mass_reader {
+            let roll_count = self.roll_count;
+            if let Some(r) = &mut self.mass_reader {
                 if r.layout == layout && r.state.load(Ordering::Acquire) == 0 {
                     self.world.sim.encode_mass(&mut enc);
                     enc.copy_buffer_to_buffer(buf, 0, &r.staging, 0, r.staging.size());
                     r.state.store(1, Ordering::Release);
+                    r.roll_at_request = roll_count;
                     mass_submitted = true;
                 }
             }
@@ -825,7 +884,7 @@ impl State {
         } else {
             None
         };
-        let overlay = Overlay { plane_y: painting.then_some(self.ui.plane_y), brush };
+        let overlay = Overlay { plane_y: painting.then_some(self.ui.plane_y), brush, floor_offset: self.floor_offset.into() };
         let size = (self.config.width, self.config.height);
         self.renderer.render(&self.device, &self.queue, &mut enc, &view, size, &self.camera, &self.ui.settings, &overlay, now as f32);
 
@@ -871,18 +930,5 @@ impl State {
         self.window.pre_present_notify();
         self.queue.present(frame);
         Ok(())
-    }
-}
-
-/// Used only if no presets are embedded.
-fn fallback_soup() -> Preset {
-    Preset {
-        name: "Primordial soup".into(),
-        description: "Random blobs under a classic single-kernel rule.".into(),
-        rule: LeniaParams::default(),
-        cells: None,
-        init: Some(crate::sim::preset::SoupInit { blobs: 12, blob_radius: 1.0, density: 0.5 }),
-        world_size: None,
-        kind: "soup".into(),
     }
 }

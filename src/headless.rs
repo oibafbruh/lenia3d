@@ -75,10 +75,10 @@ pub fn mass(g: &Gpu, world: &World) -> Vec<f64> {
     let mut enc = g.device.create_command_encoder(&Default::default());
     world.sim.encode_mass(&mut enc);
     g.queue.submit([enc.finish()]);
-    let (buf, groups) = world.sim.mass_buffer();
-    let bytes = read_buffer_bytes(&g.device, &g.queue, buf, 0, groups as u64 * 4 * world.sim.channels.len() as u64);
+    let (buf, groups, size) = world.sim.mass_buffer();
+    let bytes = read_buffer_bytes(&g.device, &g.queue, buf, 0, size);
     let vals: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
-    vals.chunks(groups as usize).map(|c| c.iter().map(|&v| v as f64).sum()).collect()
+    crate::sim::stats_from_partials(&vals, groups, world.n()).iter().map(|s| s.mass).collect()
 }
 
 pub fn screenshot(opts: &Options, out: &str) -> Result<()> {
@@ -203,25 +203,38 @@ pub fn bench(opts: &Options) -> Result<()> {
     Ok(())
 }
 
-/// Run every Chan species and report whether it survives (for verification).
-pub fn chan_check(opts: &Options) -> Result<()> {
-    let file = opts.chan_file.as_deref().ok_or_else(|| anyhow!("--chan-file is required"))?;
+/// Run every preset (built-in, plus Chan's species if a file is given) and
+/// report whether it stays alive and bounded.
+pub fn check_presets(opts: &Options) -> Result<()> {
     let g = Gpu::headless()?;
-    let species = chan::parse_animals(&std::fs::read_to_string(file)?)?;
-    let mut alive = 0;
-    for p in &species {
-        let need = (2.0 * p.rule.R + 8.0).max(p.pattern().map(|q| q.dims.iter().copied().max().unwrap_or(0)).unwrap_or(0) as f32 + 16.0);
-        let n = if need <= 64.0 { 64 } else { 128 };
+    let presets = all_presets(opts.chan_file.as_deref())?;
+    let mut ok_count = 0;
+    for p in &presets {
+        let need = p.pattern().map(|q| q.dims.iter().copied().max().unwrap_or(0) as f32 + 16.0).unwrap_or(0.0).max(2.0 * p.rule.R + 8.0);
+        let n = if need <= 64.0 { 64 } else { 128 }.max(opts.size.min(128));
         let mut world = World::new(&g.device, n, p.rule.clone());
         world.load_preset(&g.device, &g.queue, p, 1.0);
-        let m0 = mass(&g, &world)[0];
+        let m0: f64 = mass(&g, &world).iter().sum();
+        let t = Instant::now();
         run_steps(&g, &mut world, opts.steps);
-        let m1 = mass(&g, &world)[0];
-        let ratio = m1 / m0.max(1e-9);
-        let ok = ratio > 0.5 && ratio < 2.0;
-        alive += ok as usize;
-        println!("{:<4} {:<45} n={n:<3} mass {m0:9.1} -> {m1:9.1} ({ratio:5.2}x)", if ok { "ok" } else { "FAIL" }, p.name);
+        let ms = mass(&g, &world);
+        let m1: f64 = ms.iter().sum();
+        let cells = (n as f64).powi(3) * p.rule.channels as f64;
+        let ok = if p.pattern().is_some() {
+            let r = m1 / m0.max(1e-9);
+            r > 0.5 && r < 2.0
+        } else {
+            m1 > 0.001 * cells && m1 < 0.6 * cells
+        };
+        ok_count += ok as usize;
+        println!(
+            "{:<4} {:<34} n={n:<3} mass {m0:9.1} -> {m1:9.1} {:?} ({:.1}s)",
+            if ok { "ok" } else { "FAIL" },
+            p.name,
+            ms.iter().map(|m| m.round()).collect::<Vec<_>>(),
+            t.elapsed().as_secs_f64()
+        );
     }
-    println!("{alive}/{} species stable after {} steps", species.len(), opts.steps);
+    println!("{ok_count}/{} presets stable after {} steps", presets.len(), opts.steps);
     Ok(())
 }

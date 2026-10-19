@@ -92,6 +92,8 @@ pub struct UiState {
     pub show_ui: bool,
     pub show_help: bool,
     pub vsync: bool,
+    /// Keep the center of mass in the middle by rolling the periodic world.
+    pub follow: bool,
     pub chan_loaded: bool,
     pub downloading: bool,
     pub status: String,
@@ -117,6 +119,7 @@ impl UiState {
             show_ui: true,
             show_help: true,
             vsync: true,
+            follow: false,
             chan_loaded: false,
             downloading: false,
             status: String::new(),
@@ -221,6 +224,9 @@ fn top_bar(ui: &mut egui::Ui, st: &mut UiState, info: &FrameInfo, actions: &mut 
                 actions.push(Action::Step);
             }
             ui.add(egui::Slider::new(&mut st.steps_per_frame, 1..=32).text("steps/frame"));
+            ui.checkbox(&mut st.follow, "Follow").on_hover_text(
+                "Keep the creature centered: the periodic world is shifted so the center of mass stays in the middle. Paused while walls exist.",
+            );
             ui.separator();
             egui::ComboBox::from_id_salt("worldsize")
                 .selected_text(format!("World {}³", info.n))

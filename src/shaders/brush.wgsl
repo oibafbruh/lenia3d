@@ -2,7 +2,7 @@
 // Dispatched over the brush bounding cube (with periodic wrap).
 struct Params {
     n: u32,
-    mode: u32, // 0 noise blob, 1 add density, 2 erase, 3 add wall, 4 remove wall
+    mode: u32, // 0 noise blob, 1 add density, 2 erase, 3 add wall, 4 remove wall, 5 soup seed
     seed: u32,
     extent: u32,
     origin: vec3<i32>,
@@ -27,9 +27,13 @@ fn pcg3d(v0: vec3<u32>) -> vec3<u32> {
     return v;
 }
 
-fn rand01(c: vec3<u32>, seed: u32) -> f32 {
+fn rand2(c: vec3<u32>, seed: u32) -> vec2<f32> {
     let h = pcg3d(c ^ vec3<u32>(seed, seed * 747796405u, seed * 2891336453u));
-    return f32(h.x >> 8u) / 16777216.0;
+    return vec2<f32>(f32(h.x >> 8u), f32(h.y >> 8u)) / 16777216.0;
+}
+
+fn rand01(c: vec3<u32>, seed: u32) -> f32 {
+    return rand2(c, seed).x;
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -65,6 +69,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         case 4u: {
             wall[i] = 0.0;
+        }
+        case 5u: {
+            // soup seeding: smoothstep falloff, cell filled with probability `strength`
+            let t = 1.0 - d;
+            let w = t * t * (3.0 - 2.0 * t);
+            let r = rand2(c, params.seed);
+            let v = select(0.0, r.y * w, r.x < params.strength);
+            a[i] = max(a[i], v) * (1.0 - wall[i]);
         }
         default: {}
     }

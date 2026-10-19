@@ -1,0 +1,75 @@
+{
+  "name": "Onion Reef",
+  "description": "Two-channel soup on a looser version of the Twin Onion rule. Dense two-tone blobs keep budding, deforming, merging and dissolving, and never freeze.",
+  "R": 10.0,
+  "T": 10.0,
+  "channels": 2,
+  "kernels": [
+    {
+      "src": 0,
+      "dst": 0,
+      "r": 1.0,
+      "b": [
+        1.0,
+        0.98,
+        0.37
+      ],
+      "m": 0.213,
+      "s": 0.07135,
+      "h": 0.46,
+      "kn": 1,
+      "gn": 1
+    },
+    {
+      "src": 1,
+      "dst": 1,
+      "r": 0.93,
+      "b": [
+        1.0,
+        1.0
+      ],
+      "m": 0.158,
+      "s": 0.05202,
+      "h": 0.56,
+      "kn": 1,
+      "gn": 1
+    },
+    {
+      "src": 0,
+      "dst": 1,
+      "r": 0.85,
+      "b": [
+        1.0
+      ],
+      "m": 0.258,
+      "s": 0.06944,
+      "h": 0.44,
+      "kn": 1,
+      "gn": 1
+    },
+    {
+      "src": 1,
+      "dst": 0,
+      "r": 0.78,
+      "b": [
+        0.71,
+        1.0,
+        1.0,
+        0.28
+      ],
+      "m": 0.162,
+      "s": 0.03664,
+      "h": 0.54,
+      "kn": 1,
+      "gn": 1
+    }
+  ],
+  "cells": null,
+  "world_size": 64,
+  "kind": "soup",
+  "init": {
+    "blobs": 10,
+    "blob_radius": 1.12,
+    "density": 0.89
+  }
+}

@@ -13,6 +13,8 @@ pub struct World {
     pub current: Option<Preset>,
     /// Scale applied to the current preset (pattern size and R).
     pub scale: f32,
+    /// Set when walls may exist (follow mode is disabled then).
+    pub has_walls: bool,
     seed: u32,
 }
 
@@ -36,7 +38,7 @@ impl Rng {
 
 impl World {
     pub fn new(device: &wgpu::Device, n: u32, params: LeniaParams) -> Self {
-        Self { sim: Simulation::new(device, n, params), current: None, scale: 1.0, seed: 1 }
+        Self { sim: Simulation::new(device, n, params), current: None, scale: 1.0, has_walls: false, seed: 1 }
     }
 
     pub fn n(&self) -> u32 {
@@ -52,6 +54,7 @@ impl World {
     pub fn resize(&mut self, device: &wgpu::Device, n: u32) {
         let params = self.sim.params().clone();
         self.sim = Simulation::new(device, n, params);
+        self.has_walls = false;
     }
 
     /// Rule scaled by `scale` (radius grows with the pattern).
@@ -92,8 +95,9 @@ impl World {
         queue.submit([enc.finish()]);
     }
 
-    /// Random blobs scattered over the world. The blob count is given for a
-    /// 64^3 world and scaled with the world volume.
+    /// Random blobs scattered over the world, matching `seed_blobs` in
+    /// tools/lenia_ref.py. The blob count is given for a 64^3 world and is
+    /// scaled with the world volume.
     pub fn seed_soup(&mut self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder, init: &SoupInit) {
         let n = self.n() as f32;
         let r = self.sim.params().R * init.blob_radius;
@@ -102,7 +106,7 @@ impl World {
         for _ in 0..count {
             let c = [rng.f32() * n, rng.f32() * n, rng.f32() * n];
             let seed = rng.next_u32();
-            self.sim.brush(device, enc, BrushMode::Noise, None, c, r, init.density * 2.0, seed);
+            self.sim.brush(device, enc, BrushMode::Seed, None, c, r, init.density, seed);
         }
     }
 
@@ -157,6 +161,7 @@ impl World {
         }
         f.read_exact(&mut buf)?;
         self.sim.upload_wall(queue, &dequantize(&buf));
+        self.has_walls = true;
         self.sim.generation = header.generation;
         self.sim.time = header.time;
         Ok(())

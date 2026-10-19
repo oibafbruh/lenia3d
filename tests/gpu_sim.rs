@@ -203,3 +203,48 @@ fn lenia_step_matches_cpu() {
         }
     }
 }
+
+#[test]
+fn center_of_mass_and_roll() {
+    let Some(g) = gpu() else { return };
+    let n = 32u32;
+    let cells = (n as usize).pow(3);
+    let sim = Simulation::new(&g.device, n, LeniaParams::default());
+    // a small cube straddling the x/z boundary: cells x in {30,31,0,1}, y in 10..12, z in {31,0}
+    let mut data = vec![0.0f32; cells];
+    for &x in &[30usize, 31, 0, 1] {
+        for y in 10..12 {
+            for &z in &[31usize, 0] {
+                data[(z * 32 + y) * 32 + x] = 1.0;
+            }
+        }
+    }
+    sim.upload(&g.queue, 0, &data);
+    let stats = |sim: &Simulation| {
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        sim.encode_mass(&mut enc);
+        g.queue.submit([enc.finish()]);
+        let (buf, groups, size) = sim.mass_buffer();
+        let bytes = lenia3d::gpu::read_buffer_bytes(&g.device, &g.queue, buf, 0, size);
+        lenia3d::sim::stats_from_partials(bytemuck::cast_slice(&bytes), groups, n)
+    };
+    let s = stats(&sim);
+    assert!((s[0].mass - 16.0).abs() < 1e-3);
+    let c = s[0].center.unwrap();
+    // periodic centers: x = 31.5, y = 10.5, z = 31.5 (i.e. -0.5)
+    let wrap_err = |a: f64, b: f64| ((a - b + 16.0).rem_euclid(32.0) - 16.0).abs();
+    assert!(wrap_err(c[0], 31.5) < 0.05, "x center {}", c[0]);
+    assert!(wrap_err(c[1], 10.5) < 0.05, "y center {}", c[1]);
+    assert!(wrap_err(c[2], 31.5) < 0.05, "z center {}", c[2]);
+
+    // roll by (+2, -3, +5) and check where a cell went
+    let mut enc = g.device.create_command_encoder(&Default::default());
+    sim.encode_roll(&g.device, &mut enc, [2, -3, 5]);
+    g.queue.submit([enc.finish()]);
+    let out = sim.download(&g.device, &g.queue, 0);
+    // old (x=1, y=10, z=0) -> new (3, 7, 5)
+    assert_eq!(out[(5 * 32 + 7) * 32 + 3], 1.0);
+    assert_eq!(out.iter().sum::<f32>(), 16.0);
+    let c2 = stats(&sim)[0].center.unwrap();
+    assert!(wrap_err(c2[0], 1.5) < 0.05 && wrap_err(c2[1], 7.5) < 0.05 && wrap_err(c2[2], 4.5) < 0.05, "{c2:?}");
+}

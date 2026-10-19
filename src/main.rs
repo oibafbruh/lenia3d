@@ -15,7 +15,7 @@ fn usage() -> ! {
          --resolution WxH        image size for --screenshot\n\
          --scale F               creature scale factor\n\
          --chan-file FILE        Bert Chan's animals3D.json to include\n\
-         --chan-check            verify all of Chan's species survive\n\
+         --check                 verify every preset stays alive (add --chan-file for Chan's)\n\
          --list-presets          print built-in presets"
     );
     std::process::exit(2)
@@ -61,7 +61,7 @@ fn main() {
                 opts.height = h.parse().unwrap_or_else(|_| usage());
             }
             "--bench" => action = "bench",
-            "--chan-check" => action = "chan-check",
+            "--check" | "--chan-check" => action = "check",
             "--list-presets" => action = "list",
             "--screenshot" => {
                 action = "screenshot";
@@ -82,7 +82,7 @@ fn main() {
     let result = match action {
         "bench" => headless::bench(&opts),
         "screenshot" => headless::screenshot(&opts, &out),
-        "chan-check" => headless::chan_check(&opts),
+        "check" => headless::check_presets(&opts),
         "list" => headless::all_presets(opts.chan_file.as_deref()).map(|ps| {
             for p in ps {
                 println!("{:<32} {:>2} ch {:>2} kernels  R={:<5} {}", p.name, p.rule.channels, p.rule.kernels.len(), p.rule.R, p.description);
