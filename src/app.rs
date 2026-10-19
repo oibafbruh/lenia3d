@@ -811,7 +811,7 @@ impl State {
             n: self.world.n(),
             max_n: self.max_n,
             adapter: self.adapter_name.clone(),
-            mem_mb: memory_estimate(self.world.n(), self.world.sim.params()) as f64 / 1e6,
+            mem_mb: memory_estimate(self.world.n(), self.world.sim.params(), self.world.sim.flow.is_some()) as f64 / 1e6,
         };
         let raw = self.egui_state.take_egui_input(&self.window);
         let mut actions = Vec::new();

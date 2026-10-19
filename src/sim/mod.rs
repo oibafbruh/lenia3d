@@ -8,6 +8,7 @@
 
 pub mod chan;
 pub mod fft;
+pub mod flow;
 pub mod params;
 pub mod preset;
 
@@ -105,10 +106,27 @@ struct ReduceParams {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct RollParams {
     n: u32,
-    _p: [u32; 3],
+    stride: u32,
+    _p: [u32; 2],
     shift: [i32; 3],
     _p3: u32,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct TrackParams {
+    n: u32,
+    m: u32,
+    f: u32,
+    nch: u32,
+    has_genome: u32,
+    _p: [u32; 3],
+    scale: f32,
+    _q: [f32; 3],
+}
+
+/// Floats per coarse block in the tracking buffer.
+pub const TRACK_FLOATS: usize = 12;
 
 /// Per-channel statistics from the moments reduction.
 #[derive(Clone, Debug, Default)]
@@ -177,6 +195,7 @@ struct Pipelines {
     stamp: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
     roll: wgpu::ComputePipeline,
+    track: wgpu::ComputePipeline,
 }
 
 fn compute_pipeline(device: &wgpu::Device, label: &str, src: &str) -> wgpu::ComputePipeline {
@@ -205,6 +224,7 @@ impl Pipelines {
             stamp: compute_pipeline(device, "stamp", include_str!("../shaders/stamp.wgsl")),
             reduce: compute_pipeline(device, "reduce", include_str!("../shaders/reduce.wgsl")),
             roll: compute_pipeline(device, "roll", include_str!("../shaders/roll.wgsl")),
+            track: compute_pipeline(device, "track", include_str!("../shaders/flow/track.wgsl")),
         }
     }
 }
@@ -239,6 +259,10 @@ pub struct Simulation {
     pub generation: u64,
     pub time: f64,
     layout_id: u64,
+    /// Present in Flow mode (Flow Lenia with genomes and ecology).
+    pub flow: Option<flow::FlowState>,
+    track_out: wgpu::Buffer,
+    track_dummy: wgpu::Buffer,
 }
 
 fn next_layout_id() -> u64 {
@@ -279,13 +303,20 @@ fn dispatch_linear(pass: &mut wgpu::ComputePass<'_>, total: u32) {
 }
 
 /// Estimated GPU memory use in bytes for a grid size and rule.
-pub fn memory_estimate(n: u32, params: &LeniaParams) -> u64 {
+pub fn memory_estimate(n: u32, params: &LeniaParams, flow: bool) -> u64 {
     let cells = (n as u64).pow(3);
     let c = params.channels as u64;
     let pairs = params.kernels.len().div_ceil(2) as u64;
     let packed = (params.channels as u64).div_ceil(2);
-    // channels + accumulators + wall + complex buffers + render volume
-    cells * 4 * (2 * c + 1) + cells * 8 * (packed + 2 * pairs) + cells * 8
+    // channels + accumulators + wall + complex buffers + render volumes
+    let base = cells * 4 * (2 * c + 1) + cells * 8 * (packed + 2 * pairs) + cells * 16;
+    base + if flow { flow::FlowState::memory_estimate(n, params.channels) } else { 0 }
+}
+
+/// Coarse tracking grid size for a world size.
+pub fn track_grid(n: u32) -> (u32, u32) {
+    let m = n.min(32);
+    (m, n / m)
 }
 
 impl Simulation {
@@ -326,6 +357,9 @@ impl Simulation {
             generation: 0,
             time: 0.0,
             layout_id: next_layout_id(),
+            flow: None,
+            track_out: field_buffer(device, "track", (track_grid(n).0 as u64).pow(3) * TRACK_FLOATS as u64 * 4),
+            track_dummy: field_buffer(device, "track dummy", 64),
         };
         sim.allocate_complex(device);
         sim.rebuild_plan(device);
@@ -374,6 +408,9 @@ impl Simulation {
             }
             queue.submit([enc.finish()]);
             self.layout_id = next_layout_id();
+            if let Some(f) = self.flow.as_mut() {
+                f.set_channels(device, self.n, params.channels);
+            }
         }
         self.params = params;
         if channels_changed || pairs_changed {
@@ -497,6 +534,17 @@ impl Simulation {
             .collect();
 
         self.plan = StepPlan { pack, packed_fft, multiply, work_fft, growth, kernel_gen, kspec_fft, reduce };
+        if let Some(f) = self.flow.as_mut() {
+            let sb = flow::SimBuffers {
+                n: self.n,
+                channels: &self.channels,
+                accum: &self.accum,
+                work: &self.work,
+                wall: &self.wall,
+                rule: &self.params,
+            };
+            f.rebuild(device, &self.fft, &sb);
+        }
     }
 
     /// Record `steps` simulation steps into `encoder`.
@@ -525,33 +573,120 @@ impl Simulation {
                 dispatch_linear(&mut pass, total);
                 self.fft.run(&mut pass, fb, true);
             }
-            pass.set_pipeline(&self.pipes.growth);
-            for bg in &self.plan.growth {
-                pass.set_bind_group(0, bg, &[]);
-                dispatch_linear(&mut pass, total);
+            match self.flow.as_mut() {
+                Some(f) => f.encode_after_potentials(&mut pass, &self.fft, total),
+                None => {
+                    pass.set_pipeline(&self.pipes.growth);
+                    for bg in &self.plan.growth {
+                        pass.set_bind_group(0, bg, &[]);
+                        dispatch_linear(&mut pass, total);
+                    }
+                }
             }
         }
         self.generation += steps as u64;
         self.time += steps as f64 * self.params.dt() as f64;
     }
 
-    /// Periodically translate the whole world (channels and walls) by `shift` cells.
+    /// Periodically translate the whole world (channels, walls, and in Flow
+    /// mode genomes, food and fertility) by `shift` cells.
     pub fn encode_roll(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, shift: [i32; 3]) {
         let n = self.n;
         let bytes = self.cells() as u64 * 4;
-        let u = uniform(device, &RollParams { n, _p: [0; 3], shift, _p3: 0 });
         let groups = n.div_ceil(4);
-        let mut fields: Vec<&wgpu::Buffer> = self.channels.iter().collect();
-        fields.push(&self.wall);
+        let u1 = uniform(device, &RollParams { n, stride: 1, _p: [0; 2], shift, _p3: 0 });
+        let mut fields: Vec<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, u64)> = Vec::new();
         let tmp = &self.accum[0];
-        for f in fields {
-            encoder.copy_buffer_to_buffer(f, 0, tmp, 0, bytes);
-            let bg = bind_group(device, &self.pipes.roll, &[tmp, f, &u]);
+        for c in &self.channels {
+            fields.push((c, tmp, &u1, bytes));
+        }
+        fields.push((&self.wall, tmp, &u1, bytes));
+        let u16 = uniform(device, &RollParams { n, stride: 16, _p: [0; 2], shift, _p3: 0 });
+        if let Some(f) = &self.flow {
+            fields.push((&f.food, tmp, &u1, bytes));
+            fields.push((&f.fert, tmp, &u1, bytes));
+            fields.push((&f.genome, f.genome_next_scratch(), &u16, bytes * 16));
+        }
+        for (f, tmp, u, size) in fields {
+            encoder.copy_buffer_to_buffer(f, 0, tmp, 0, size);
+            let bg = bind_group(device, &self.pipes.roll, &[tmp, f, u]);
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.pipes.roll);
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(groups, groups, groups);
         }
+    }
+
+    /// Record the coarse tracking pass; returns the buffer, grid size and bytes.
+    pub fn encode_track(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) -> (&wgpu::Buffer, u32, u64) {
+        let n = self.n;
+        let (m, f) = track_grid(n);
+        let ch = |c: usize| self.channels.get(c).unwrap_or(&self.channels[0]);
+        let (genome, food, sense) = match &self.flow {
+            Some(fl) => (&fl.genome, &fl.food, &fl.sense),
+            None => (&self.track_dummy, &self.track_dummy, &self.track_dummy),
+        };
+        let u = uniform(
+            device,
+            &TrackParams {
+                n,
+                m,
+                f,
+                nch: self.channels.len() as u32,
+                has_genome: self.flow.is_some() as u32,
+                _p: [0; 3],
+                scale: 1.0 / (self.cells() as f32),
+                _q: [0.0; 3],
+            },
+        );
+        let bg = bind_group(device, &self.pipes.track, &[ch(0), ch(1), ch(2), genome, food, sense, &self.track_out, &u]);
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&self.pipes.track);
+        pass.set_bind_group(0, &bg, &[]);
+        let g = m.div_ceil(4);
+        pass.dispatch_workgroups(g, g, g);
+        drop(pass);
+        (&self.track_out, m, (m as u64).pow(3) * TRACK_FLOATS as u64 * 4)
+    }
+
+    /// Switch to Flow mode (allocates genome, food and flow buffers).
+    pub fn enable_flow(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, params: flow::FlowParams, eco: flow::EcologyParams) {
+        match self.flow.as_mut() {
+            Some(f) => {
+                f.params = params;
+                f.eco = eco;
+                f.invalidate();
+            }
+            None => {
+                self.flow = Some(flow::FlowState::new(device, queue, self.n, self.channels.len(), params, eco));
+                self.layout_id = next_layout_id();
+            }
+        }
+        self.rebuild_plan(device);
+    }
+
+    /// Back to classic Lenia.
+    pub fn disable_flow(&mut self, device: &wgpu::Device) {
+        if self.flow.take().is_some() {
+            self.layout_id = next_layout_id();
+            self.rebuild_plan(device);
+        }
+    }
+
+    /// Upload Flow-mode parameters (call once per frame before stepping).
+    pub fn update_flow(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let (n, nch, dt) = (self.n, self.channels.len(), self.params.dt());
+        if self.flow.as_ref().is_some_and(|f| f.needs_rebuild()) {
+            self.rebuild_plan(device);
+        }
+        if let Some(f) = &self.flow {
+            f.write_uniform(queue, n, nch, dt);
+        }
+    }
+
+    /// Buffers needed by flow brushes and budding.
+    pub fn flow_buffers(&self) -> flow::SimBuffers<'_> {
+        flow::SimBuffers { n: self.n, channels: &self.channels, accum: &self.accum, work: &self.work, wall: &self.wall, rule: &self.params }
     }
 
     /// Record a pass computing per-channel partial sums (8 floats per
