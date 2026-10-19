@@ -118,7 +118,7 @@ impl Default for RenderSettings {
             genome_colors: true,
             food_haze: 0.15,
             show_organs: true,
-            sound_rings: 1.0,
+            sound_rings: 0.5,
         }
     }
 }
@@ -221,6 +221,8 @@ pub struct GpuCreature {
 }
 
 pub const MAX_GPU_CREATURES: usize = 256;
+/// Organ anchor slots per creature (`ANCHORS` in raymarch.wgsl).
+const ANCHORS_PER_CREATURE: usize = 12;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -266,6 +268,7 @@ struct VolumeBinding {
     prep_bg: wgpu::BindGroup,
     brick_bg: wgpu::BindGroup,
     raymarch_bg: wgpu::BindGroup,
+    anchor_bg: wgpu::BindGroup,
 }
 
 pub struct Renderer {
@@ -285,6 +288,9 @@ pub struct Renderer {
     frame: u32,
     creatures: wgpu::Buffer,
     creature_count: u32,
+    /// Per creature: body surface distance along each organ direction.
+    anchors: wgpu::Buffer,
+    anchor_pipeline: wgpu::ComputePipeline,
     dummy: wgpu::Buffer,
 }
 
@@ -351,6 +357,14 @@ impl Renderer {
         let brick_pipeline = compute(device, "bricks", include_str!("../shaders/bricks.wgsl"));
         let rm = shader(device, "raymarch", include_str!("../shaders/raymarch.wgsl"));
         let raymarch_pipeline = fullscreen_pipeline(device, "raymarch", &rm, "fs_main", HDR_FORMAT, None);
+        let anchor_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("organ anchors"),
+            layout: None,
+            module: &rm,
+            entry_point: Some("anchor_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let bm = shader(device, "bloom", include_str!("../shaders/bloom.wgsl"));
         let down_pipeline = fullscreen_pipeline(device, "bloom down", &bm, "fs_down", HDR_FORMAT, None);
         let additive = wgpu::BlendState {
@@ -408,6 +422,13 @@ impl Renderer {
                 mapped_at_creation: false,
             }),
             creature_count: 0,
+            anchors: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("organ anchors"),
+                size: (MAX_GPU_CREATURES * ANCHORS_PER_CREATURE * 4) as u64,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
+            anchor_pipeline,
             dummy: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("render dummy"),
                 size: 64,
@@ -596,6 +617,18 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: bricks.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&aux_view) },
                 wgpu::BindGroupEntry { binding: 5, resource: self.creatures.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: self.anchors.as_entire_binding() },
+            ],
+        });
+        let anchor_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("organ anchors"),
+            layout: &self.anchor_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.uniforms.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: self.creatures.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: self.anchors.as_entire_binding() },
             ],
         });
         let _ = queue;
@@ -611,6 +644,7 @@ impl Renderer {
             prep_bg,
             brick_bg,
             raymarch_bg,
+            anchor_bg,
         });
     }
 
@@ -748,6 +782,12 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             })
+        }
+        if self.creature_count > 0 && settings.show_organs {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("organ anchors"), timestamp_writes: None });
+            pass.set_pipeline(&self.anchor_pipeline);
+            pass.set_bind_group(0, &vol.anchor_bg, &[]);
+            pass.dispatch_workgroups((self.creature_count * ANCHORS_PER_CREATURE as u32).div_ceil(64), 1, 1);
         }
         {
             let mut pass = color_pass(encoder, &t.hdr_view, wgpu::LoadOp::Clear(wgpu::Color::BLACK));
