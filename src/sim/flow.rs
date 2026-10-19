@@ -11,8 +11,12 @@ use wgpu::util::DeviceExt;
 pub const GENES: usize = 16;
 pub type Genome = [f32; GENES];
 
-/// Gene indices (genes 0..7 are the kernel weights h_k).
+/// Gene indices (genes 0..5 are the kernel weights h_k).
 pub mod gene {
+    /// Kernel weights h_0..h_5 are genes 0..5.
+    pub const KERNELS: usize = 6;
+    pub const TUNE: usize = 6;
+    pub const ALARM: usize = 7;
     pub const EYE: usize = 8;
     pub const EAR: usize = 9;
     pub const VOICE: usize = 10;
@@ -37,11 +41,15 @@ pub struct FlowParams {
     pub w_eye: f32,
     pub w_ear: f32,
     pub claw_bias: f32,
+    /// Genetic distance above which contact means combat instead of mixing.
+    pub compat: f32,
+    /// Fraction of foreign matter a clawed resident destroys per unit time.
+    pub combat: f32,
 }
 
 impl Default for FlowParams {
     fn default() -> Self {
-        Self { theta: 2.0, n: 2.0, s: 0.65, far: 2.5, w_eye: 1.0, w_ear: 1.0, claw_bias: 4.0 }
+        Self { theta: 2.0, n: 2.0, s: 0.65, far: 2.5, w_eye: 1.0, w_ear: 1.0, claw_bias: 4.0, compat: 0.6, combat: 1.0 }
     }
 }
 
@@ -97,36 +105,104 @@ pub struct TraitRanges {
     pub voice: [f32; 2],
     pub mouth: [f32; 2],
     pub claw: [f32; 2],
+    pub alarm: [f32; 2],
+    /// Number of founding "languages": founders share one of this many pitches
+    /// (0 = every founder gets a random pitch).
+    pub languages: u32,
 }
 
 impl Default for TraitRanges {
     fn default() -> Self {
-        Self { eye: [0.0, 0.3], ear: [-0.2, 0.2], voice: [0.0, 0.4], mouth: [0.3, 0.7], claw: [0.0, 0.2] }
+        Self {
+            eye: [0.0, 0.3],
+            ear: [-0.2, 0.2],
+            voice: [0.0, 0.4],
+            mouth: [0.3, 0.7],
+            claw: [0.0, 0.2],
+            alarm: [0.0, 0.3],
+            languages: 3,
+        }
+    }
+}
+
+/// Organ genes of a genome (everything except the kernel weights).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Traits {
+    pub eye: f32,
+    pub ear: f32,
+    pub voice: f32,
+    pub mouth: f32,
+    pub claw: f32,
+    pub tune: f32,
+    pub alarm: f32,
+    pub pitch: f32,
+    pub hue: f32,
+    pub timbre: f32,
+}
+
+impl Traits {
+    pub fn of(g: &Genome) -> Self {
+        Self {
+            eye: g[gene::EYE],
+            ear: g[gene::EAR],
+            voice: g[gene::VOICE],
+            mouth: g[gene::MOUTH],
+            claw: g[gene::CLAW],
+            tune: g[gene::TUNE],
+            alarm: g[gene::ALARM],
+            pitch: g[gene::PITCH],
+            hue: g[gene::HUE],
+            timbre: g[gene::TIMBRE],
+        }
     }
 }
 
 /// Genome with the rule's kernel weights and the given organ genes.
-pub fn make_genome(rule: &LeniaParams, eye: f32, ear: f32, voice: f32, mouth: f32, claw: f32, pitch: f32, hue: f32, timbre: f32) -> Genome {
+pub fn make_genome(rule: &LeniaParams, t: &Traits) -> Genome {
     let mut g = [0.0; GENES];
-    for (k, kp) in rule.kernels.iter().take(8).enumerate() {
+    for (k, kp) in rule.kernels.iter().take(gene::KERNELS).enumerate() {
         g[k] = kp.h.clamp(0.0, 1.0);
     }
-    g[gene::EYE] = eye;
-    g[gene::EAR] = ear;
-    g[gene::VOICE] = voice;
-    g[gene::MOUTH] = mouth;
-    g[gene::CLAW] = claw;
-    g[gene::PITCH] = pitch;
-    g[gene::HUE] = hue;
-    g[gene::TIMBRE] = timbre;
+    g[gene::EYE] = t.eye;
+    g[gene::EAR] = t.ear;
+    g[gene::VOICE] = t.voice;
+    g[gene::MOUTH] = t.mouth;
+    g[gene::CLAW] = t.claw;
+    g[gene::TUNE] = t.tune;
+    g[gene::ALARM] = t.alarm;
+    g[gene::PITCH] = t.pitch;
+    g[gene::HUE] = t.hue;
+    g[gene::TIMBRE] = t.timbre;
+    clamp_genome(&mut g);
     g
 }
 
-/// Random organ genes within `t`; `r` yields uniform numbers in [0, 1).
+/// Random founder genome within `t`; `r` yields uniform numbers in [0, 1).
+/// Founders of the same language share pitch, ear tuning and (roughly) hue.
 pub fn random_genome(rule: &LeniaParams, t: &TraitRanges, mut r: impl FnMut() -> f32) -> Genome {
-    let mut pick = |v: [f32; 2]| v[0] + (v[1] - v[0]) * r();
-    let (eye, ear, voice, mouth, claw) = (pick(t.eye), pick(t.ear), pick(t.voice), pick(t.mouth), pick(t.claw));
-    make_genome(rule, eye, ear, voice, mouth, claw, r(), r(), r())
+    let pick = |v: [f32; 2], r: &mut dyn FnMut() -> f32| v[0] + (v[1] - v[0]) * r();
+    let eye = pick(t.eye, &mut r);
+    let ear = pick(t.ear, &mut r);
+    let voice = pick(t.voice, &mut r);
+    let mouth = pick(t.mouth, &mut r);
+    let claw = pick(t.claw, &mut r);
+    let alarm = pick(t.alarm, &mut r);
+    let (pitch, hue) = if t.languages > 0 {
+        let lang = ((r() * t.languages as f32) as u32).min(t.languages - 1);
+        let base = (lang as f32 + 0.5) / t.languages as f32;
+        ((base + (r() - 0.5) * 0.04).clamp(0.0, 1.0), (base * 0.85 + (r() - 0.5) * 0.06).rem_euclid(1.0))
+    } else {
+        (r(), r())
+    };
+    let traits = Traits { eye, ear, voice, mouth, claw, tune: pitch, alarm, pitch, hue, timbre: r() };
+    make_genome(rule, &traits)
+}
+
+/// Genetic distance used by the compatibility gate (mirrors the shader).
+pub fn genetic_distance(a: &Genome, b: &Genome) -> f32 {
+    (0..4).map(|k| (a[k] - b[k]).abs()).sum::<f32>()
+        + 3.0 * (a[gene::PITCH] - b[gene::PITCH]).abs()
+        + 0.5 * (a[gene::TIMBRE] - b[gene::TIMBRE]).abs()
 }
 
 /// Clamp genes to their valid ranges (hue wraps).
@@ -164,7 +240,9 @@ pub struct FlowUniform {
     regrow: f32,
     mutation_rate: f32,
     mutation_size: f32,
-    _p: [f32; 3],
+    compat: f32,
+    combat: f32,
+    _p: f32,
 }
 
 #[repr(C)]
@@ -333,12 +411,14 @@ struct Plan {
     affinity: Vec<wgpu::BindGroup>,
     sense_pack: wgpu::BindGroup,
     scale_real: wgpu::BindGroup,
+    scale_real_b: wgpu::BindGroup,
     gauss: wgpu::BindGroup,
     flow_field: Vec<wgpu::BindGroup>,
     reintegrate: wgpu::BindGroup,
     ecology: wgpu::BindGroup,
     tick: wgpu::BindGroup,
     sense_fft: FftBindings,
+    sense_b_fft: FftBindings,
     kfar_fft: FftBindings,
 }
 
@@ -350,6 +430,7 @@ pub struct FlowState {
     pub food: wgpu::Buffer,
     pub fert: wgpu::Buffer,
     pub sense: wgpu::Buffer,
+    pub sense_b: wgpu::Buffer,
     kfar: wgpu::Buffer,
     next: Vec<wgpu::Buffer>,
     disp: Vec<wgpu::Buffer>,
@@ -376,7 +457,8 @@ impl FlowState {
             genome_next: storage(device, "genome next", cells * 64),
             food,
             fert,
-            sense: storage(device, "senses", cells * 8),
+            sense: storage(device, "senses a", cells * 8),
+            sense_b: storage(device, "senses b", cells * 8),
             kfar: storage(device, "sense kernel", cells * 8),
             next: (0..nch).map(|_| storage(device, "mass next", cells * 4)).collect(),
             disp: (0..nch).map(|_| storage(device, "displacement", cells * 16)).collect(),
@@ -401,7 +483,7 @@ impl FlowState {
     /// GPU memory used by the flow-specific buffers, in bytes.
     pub fn memory_estimate(n: u32, nch: usize) -> u64 {
         let cells = (n as u64).pow(3);
-        cells * (64 * 2 + 4 * 2 + 8 * 2 + nch as u64 * (4 + 16))
+        cells * (64 * 2 + 4 * 2 + 8 * 3 + nch as u64 * (4 + 16))
     }
 
     /// Reallocate per-channel buffers after a channel count change.
@@ -441,7 +523,9 @@ impl FlowState {
             regrow: e.regrow,
             mutation_rate: e.mutation_rate,
             mutation_size: e.mutation_size,
-            _p: [0.0; 3],
+            compat: p.compat,
+            combat: p.combat,
+            _p: 0.0,
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
     }
@@ -488,9 +572,14 @@ impl FlowState {
                 affinity.push(bind(device, &pipes.affinity, &[&sb.work[k / 2], &sb.accum[c], &self.genome, &u]));
             }
         }
-        let sense_pack = bind(device, &pipes.sense_pack, &[ch(0), ch(1), ch(2), &self.genome, &self.food, &self.sense, &self.uniform]);
+        let sense_pack = bind(
+            device,
+            &pipes.sense_pack,
+            &[ch(0), ch(1), ch(2), &self.genome, &self.food, &self.sense, &self.sense_b, &self.uniform],
+        );
         let su = uniform(device, &[total, 0u32, 0, 0]);
         let scale_real = bind(device, &pipes.scale_real, &[&self.sense, &self.kfar, &su]);
+        let scale_real_b = bind(device, &pipes.scale_real, &[&self.sense_b, &self.kfar, &su]);
         let far = (self.params.far * rule.R).clamp(2.0, n as f32 / 2.0 - 1.0);
         let sigma = far / 3.0;
         let mut sum = 0.0f64;
@@ -518,7 +607,7 @@ impl FlowState {
                 bind(
                     device,
                     &pipes.flow_field,
-                    &[&sb.accum[c], ch(0), ch(1), ch(2), &self.sense, &self.genome, sb.wall, &self.disp[c], &self.uniform, &cu],
+                    &[&sb.accum[c], ch(0), ch(1), ch(2), &self.sense, &self.genome, sb.wall, &self.disp[c], &self.uniform, &cu, &self.sense_b],
                 )
             })
             .collect();
@@ -527,7 +616,7 @@ impl FlowState {
         let reintegrate = bind(
             device,
             &pipes.reintegrate,
-            &[d(0), d(1), d(2), &self.genome, &self.genome_next, nx(0), nx(1), nx(2), sb.wall, &self.uniform, &self.state],
+            &[d(0), d(1), d(2), &self.genome, &self.genome_next, nx(0), nx(1), nx(2), sb.wall, &self.uniform, &self.state, &self.food],
         );
         let nr = |c: usize| self.next.get(c).unwrap_or(&self.next[0]);
         let aw = |c: usize| sb.channels.get(c).unwrap_or(&self.dummies[3 + c]);
@@ -549,6 +638,7 @@ impl FlowState {
                 sb.wall,
                 &self.uniform,
                 &self.state,
+                &self.sense_b,
             ],
         );
         let tick = bind(device, &pipes.tick, &[&self.state]);
@@ -556,12 +646,14 @@ impl FlowState {
             affinity,
             sense_pack,
             scale_real,
+            scale_real_b,
             gauss,
             flow_field,
             reintegrate,
             ecology,
             tick,
             sense_fft: fft.bindings(device, &self.sense),
+            sense_b_fft: fft.bindings(device, &self.sense_b),
             kfar_fft: fft.bindings(device, &self.kfar),
         });
     }
@@ -596,10 +688,14 @@ impl FlowState {
         pass.set_bind_group(0, &plan.sense_pack, &[]);
         dispatch_linear(pass, total);
         fft.run(pass, &plan.sense_fft, false);
+        fft.run(pass, &plan.sense_b_fft, false);
         pass.set_pipeline(&self.pipes.scale_real);
         pass.set_bind_group(0, &plan.scale_real, &[]);
         dispatch_linear(pass, total);
+        pass.set_bind_group(0, &plan.scale_real_b, &[]);
+        dispatch_linear(pass, total);
         fft.run(pass, &plan.sense_fft, true);
+        fft.run(pass, &plan.sense_b_fft, true);
         pass.set_pipeline(&self.pipes.flow_field);
         for bg in &plan.flow_field {
             pass.set_bind_group(0, bg, &[]);

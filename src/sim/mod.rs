@@ -126,7 +126,7 @@ struct TrackParams {
 }
 
 /// Floats per coarse block in the tracking buffer.
-pub const TRACK_FLOATS: usize = 12;
+pub const TRACK_FLOATS: usize = 20;
 
 /// Per-channel statistics from the moments reduction.
 #[derive(Clone, Debug, Default)]
@@ -622,9 +622,9 @@ impl Simulation {
         let n = self.n;
         let (m, f) = track_grid(n);
         let ch = |c: usize| self.channels.get(c).unwrap_or(&self.channels[0]);
-        let (genome, food, sense) = match &self.flow {
-            Some(fl) => (&fl.genome, &fl.food, &fl.sense),
-            None => (&self.track_dummy, &self.track_dummy, &self.track_dummy),
+        let (genome, food) = match &self.flow {
+            Some(fl) => (&fl.genome, &fl.food),
+            None => (&self.track_dummy, &self.track_dummy),
         };
         let u = uniform(
             device,
@@ -639,7 +639,7 @@ impl Simulation {
                 _q: [0.0; 3],
             },
         );
-        let bg = bind_group(device, &self.pipes.track, &[ch(0), ch(1), ch(2), genome, food, sense, &self.track_out, &u]);
+        let bg = bind_group(device, &self.pipes.track, &[ch(0), ch(1), ch(2), genome, food, &self.track_out, &u]);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.pipes.track);
         pass.set_bind_group(0, &bg, &[]);

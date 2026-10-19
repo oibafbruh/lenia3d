@@ -10,10 +10,11 @@
 @group(0) @binding(7) var<storage, read_write> genome: array<vec4<f32>>;
 @group(0) @binding(8) var<storage, read_write> food: array<f32>;
 @group(0) @binding(9) var<storage, read> fert: array<f32>;
-@group(0) @binding(10) var<storage, read> sense: array<vec2<f32>>;
+@group(0) @binding(10) var<storage, read> sense_a: array<vec2<f32>>;
 @group(0) @binding(11) var<storage, read> wall: array<f32>;
 @group(0) @binding(12) var<uniform> fp: FlowParams;
 @group(0) @binding(13) var<storage, read> state: array<u32>;
+@group(0) @binding(14) var<storage, read> sense_b: array<vec2<f32>>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
@@ -43,7 +44,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3
         let claw = g[3].x;
         let msum = m.x + m.y + m.z;
         // eating
-        let ss = max(sense[i].y * fp.scale, 0.0);
+        let ss = max(hearing(sense_a[i].y, sense_b[i].x, g[1].z) * fp.scale, 0.0);
         let eat = min(f, fp.eat * mouth * f * min(msum, 1.0) * (1.0 + fp.social * ss / (ss + 0.1)) * dt);
         f -= eat;
         if (msum > 1e-9) {

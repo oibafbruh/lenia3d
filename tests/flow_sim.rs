@@ -2,7 +2,7 @@
 //! docs/flow_lenia.md (senses and ecology off unless noted).
 
 use lenia3d::gpu::{read_buffer_f32, Gpu};
-use lenia3d::sim::flow::{make_genome, EcologyParams, FlowBrush, FlowParams};
+use lenia3d::sim::flow::{make_genome, EcologyParams, FlowBrush, FlowParams, Traits};
 use lenia3d::sim::params::{growth, kernel_shell, kernel_sum, KernelParams, LeniaParams};
 use lenia3d::sim::Simulation;
 
@@ -119,7 +119,7 @@ fn setup(g: &Gpu, n: u32, eco: EcologyParams, a: &[f32]) -> Simulation {
     let mut sim = Simulation::new(&g.device, n, rule.clone());
     sim.enable_flow(&g.device, &g.queue, FlowParams::default(), eco);
     sim.upload(&g.queue, 0, a);
-    let genes = make_genome(&rule, 0.0, 0.0, 0.0, 0.5, 0.0, 0.5, 0.3, 0.5);
+    let genes = make_genome(&rule, &Traits { mouth: 0.5, pitch: 0.5, hue: 0.3, timbre: 0.5, ..Default::default() });
     let mut enc = g.device.create_command_encoder(&Default::default());
     sim.flow.as_ref().unwrap().brush(&g.device, &mut enc, &sim.flow_buffers(), FlowBrush::Fill, [0.0; 3], 1.0, 0.0, 0.0, &genes, 0);
     g.queue.submit([enc.finish()]);
@@ -223,4 +223,46 @@ fn budding_moves_half_with_mutation() {
     let parent = (7 * 32 + 7) * 32 + 7;
     assert!((genome[child * 16 + 12] - 0.25).abs() < 1e-6, "child claw {}", genome[child * 16 + 12]);
     assert_eq!(genome[parent * 16 + 12], 0.0);
+}
+
+/// Two touching blobs: with different "languages" (pitch) and claws they
+/// fight (matter turns into food, mass + food conserved); with the same
+/// language nothing is destroyed.
+#[test]
+fn compatibility_gate_combat() {
+    let Some(g) = gpu() else { return };
+    let n = 32u32;
+    let rule = rule();
+    let run = |pitch_b: f32| -> (f64, f64, f64) {
+        let a = blob_world(32, 11);
+        let mut sim = Simulation::new(&g.device, n, rule.clone());
+        sim.enable_flow(&g.device, &g.queue, FlowParams { combat: 2.0, ..Default::default() }, eco_off());
+        sim.upload(&g.queue, 0, &a);
+        let ga = make_genome(&rule, &Traits { claw: 1.0, pitch: 0.1, ..Default::default() });
+        let gb = make_genome(&rule, &Traits { claw: 1.0, pitch: pitch_b, ..Default::default() });
+        let fl = sim.flow.as_ref().unwrap();
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        fl.brush(&g.device, &mut enc, &sim.flow_buffers(), FlowBrush::Fill, [0.0; 3], 1.0, 0.0, 0.0, &ga, 0);
+        // the right half of the blob gets genome B
+        for z in 0..32 {
+            for y in 0..32 {
+                fl.brush(&g.device, &mut enc, &sim.flow_buffers(), FlowBrush::Paint, [24.0, y as f32, z as f32], 8.0, 0.0, 0.0, &gb, 0);
+            }
+        }
+        g.queue.submit([enc.finish()]);
+        let food0: f64 = read_buffer_f32(&g.device, &g.queue, &fl.food).iter().map(|&v| v as f64).sum();
+        let m0: f64 = a.iter().map(|&v| v as f64).sum();
+        sim.update_flow(&g.device, &g.queue);
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        sim.encode_steps(&mut enc, 20);
+        g.queue.submit([enc.finish()]);
+        let m1: f64 = sim.download(&g.device, &g.queue, 0).iter().map(|&v| v as f64).sum();
+        let food1: f64 = read_buffer_f32(&g.device, &g.queue, &sim.flow.as_ref().unwrap().food).iter().map(|&v| v as f64).sum();
+        (m0, m1, food1 - food0)
+    };
+    let (m0, m1, dfood) = run(0.9);
+    assert!(m1 < m0 * 0.995, "foreign contact should destroy matter: {m0} -> {m1}");
+    assert!(((m1 + dfood) - m0).abs() / m0 < 1e-4, "destroyed matter must become food: {m0} -> {m1} + {dfood}");
+    let (m0, m1, dfood) = run(0.1);
+    assert!(((m1 - m0) / m0).abs() < 1e-4 && dfood.abs() < 1e-3, "same language must not fight: {m0} -> {m1}, food {dfood}");
 }

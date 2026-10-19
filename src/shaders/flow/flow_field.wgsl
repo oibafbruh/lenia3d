@@ -11,12 +11,13 @@ struct C {
 @group(0) @binding(1) var<storage, read> a0: array<f32>;
 @group(0) @binding(2) var<storage, read> a1: array<f32>;
 @group(0) @binding(3) var<storage, read> a2: array<f32>;
-@group(0) @binding(4) var<storage, read> sense: array<vec2<f32>>;
+@group(0) @binding(4) var<storage, read> sense_a: array<vec2<f32>>;
 @group(0) @binding(5) var<storage, read> genome: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> wall: array<f32>;
 @group(0) @binding(7) var<storage, read_write> disp: array<vec4<f32>>;
 @group(0) @binding(8) var<uniform> fp: FlowParams;
 @group(0) @binding(9) var<uniform> cp: C;
+@group(0) @binding(10) var<storage, read> sense_b: array<vec2<f32>>;
 
 fn asum(i: u32) -> f32 {
     var s = a0[i];
@@ -56,14 +57,18 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3
     let ear = g2.y;
     if (eye != 0.0 || ear != 0.0) {
         let sc = fp.scale;
-        let s0 = sense[i] * sc;
-        let sx = (sense[ix.x] - sense[ix.y]) * (0.5 * sc);
-        let sy = (sense[iy.x] - sense[iy.y]) * (0.5 * sc);
-        let sz = (sense[iz.x] - sense[iz.y]) * (0.5 * sc);
-        let g_food = vec3<f32>(sx.x, sy.x, sz.x);
-        let g_sound = vec3<f32>(sx.y, sy.y, sz.y);
-        f += fp.w_eye * eye * clip1(g_food / (max(s0.x, 0.0) + 0.05));
-        f += fp.w_ear * ear * clip1(g_sound / (max(s0.y, 0.0) + 0.05));
+        let tune = genome[i * 4u + 1u].z;
+        let h = (1.0 - tune) * sense_a[i].y + tune * sense_b[i].x;
+        let ax = (sense_a[ix.x] - sense_a[ix.y]) * (0.5 * sc);
+        let ay = (sense_a[iy.x] - sense_a[iy.y]) * (0.5 * sc);
+        let az = (sense_a[iz.x] - sense_a[iz.y]) * (0.5 * sc);
+        let bx = (sense_b[ix.x].x - sense_b[ix.y].x) * (0.5 * sc);
+        let by = (sense_b[iy.x].x - sense_b[iy.y].x) * (0.5 * sc);
+        let bz = (sense_b[iz.x].x - sense_b[iz.y].x) * (0.5 * sc);
+        let g_food = vec3<f32>(ax.x, ay.x, az.x);
+        let g_hear = (1.0 - tune) * vec3<f32>(ax.y, ay.y, az.y) + tune * vec3<f32>(bx, by, bz);
+        f += fp.w_eye * eye * clip1(g_food / (max(sense_a[i].x * sc, 0.0) + 0.05));
+        f += fp.w_ear * ear * clip1(g_hear / (max(h * sc, 0.0) + 0.05));
     }
 
     let lim = 1.0 - fp.s;

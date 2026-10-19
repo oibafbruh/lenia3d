@@ -317,8 +317,9 @@ class FlowSim:
         food[grow] += np.float32(eco["regrow"]) * (fert[grow] - food[grow]) * dt
         rate = float(eco.get("mutation_rate", 0.0))
         if rate > 0:
-            AS2 = A.sum(axis=0)
-            hit = (AS2 > 0.01) & (rng.random(self.shape, dtype=np.float32) < rate)
+            # A'_Sigma as defined at the start of the ecology step (after reintegration,
+            # before eating/metabolism)
+            hit = (AS > 0.01) & (rng.random(self.shape, dtype=np.float32) < rate)
             idx = np.nonzero(hit)
             if len(idx[0]):
                 j = rng.integers(0, NGENES, size=len(idx[0]))

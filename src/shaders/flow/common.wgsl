@@ -22,14 +22,25 @@ struct FlowParams {
     regrow: f32,
     mutation_rate: f32,
     mutation_size: f32,
-    _p0: f32,
-    _p1: f32,
+    compat: f32,  // genetic distance above which contact means combat
+    combat: f32,  // fraction of foreign matter destroyed per unit time by claws
     _p2: f32,
 };
 
 // Genome: 16 floats per cell stored as 4 x vec4.
-// [0..7] kernel weights h_k, [8] eye, [9] ear, [10] voice, [11] mouth,
-// [12] claw, [13] pitch, [14] hue, [15] timbre.
+// [0..5] kernel weights h_k, [6] ear tuning, [7] alarm, [8] eye, [9] ear,
+// [10] voice, [11] mouth, [12] claw, [13] pitch, [14] hue, [15] timbre.
+
+// Genetic distance used for the compatibility gate (h0..h3, pitch, timbre).
+fn genetic_distance(a0: vec4<f32>, a3: vec4<f32>, b0: vec4<f32>, b3: vec4<f32>) -> f32 {
+    let dh = abs(a0 - b0);
+    return (dh.x + dh.y + dh.z + dh.w) + 3.0 * abs(a3.y - b3.y) + 0.5 * abs(a3.w - b3.w);
+}
+
+// What a cell hears: the sound bands weighted by its ear tuning.
+fn hearing(lo: f32, hi: f32, tune: f32) -> f32 {
+    return (1.0 - tune) * lo + tune * hi;
+}
 
 fn pcg(v: u32) -> u32 {
     let s = v * 747796405u + 2891336453u;

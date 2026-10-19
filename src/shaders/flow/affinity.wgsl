@@ -40,7 +40,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3
     let wv = w[i];
     let u = select(wv.x, wv.y, p.part != 0u) * p.scale;
     var h = p.h;
-    if (p.k < 8u) {
+    if (p.k < 6u) {
         let gv = genome[i * 4u + p.k / 4u];
         h = gv[p.k % 4u];
     }

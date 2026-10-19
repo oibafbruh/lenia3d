@@ -24,17 +24,19 @@ Grid: `N³`, periodic, indexed `[z][y][x]`, with cell centers at integer coordin
 
 | Gene | Name | Range | Effect |
 |---|---|---|---|
-| 0..7 | `h_0..h_7` | [0, 1] | Weight of kernel k in this cell's affinity (body physics) |
+| 0..5 | `h_0..h_5` | [0, 1] | Weight of kernel k in this cell's affinity (body physics) |
+| 6 | `tune` | [0, 1] | Which pitch the ears listen to |
+| 7 | `alarm` | [0, 1] | Scream when claws are smelled nearby |
 | 8 | `eye` | [0, 1] | Steer towards food (follows the gradient of sensed food) |
-| 9 | `ear` | [-1, 1] | Steer towards (+) or away from (−) sound |
-| 10 | `voice` | [0, 1] | Emits sound into the sound field |
+| 9 | `ear` | [-1, 1] | Steer towards (+) or away from (−) what the ears hear |
+| 10 | `voice` | [0, 1] | Calls into the sound field |
 | 11 | `mouth` | [0, 1] | Eats food |
-| 12 | `claw` | [0, 1] | Wins contested matter when bodies touch |
-| 13 | `pitch` | [0, 1] | Pitch of the voice (audio only) |
+| 12 | `claw` | [0, 1] | Fights foreign matter |
+| 13 | `pitch` | [0, 1] | Voice frequency; also the creature's "language" |
 | 14 | `hue` | [0, 1) | Color (cosmetic, inherited) |
 | 15 | `timbre` | [0, 1] | Sound timbre (audio only) |
 
-Kernels `k ≥ 8` use the rule's global `h_k`.
+Kernels `k ≥ 6` use the rule's global `h_k`.
 
 ## Parameters
 
@@ -84,12 +86,16 @@ as in classic mode.
 
 ### 3. Senses
 
-There are two sensory fields:
+Two complex fields carry four sensed quantities. Sound is split into a low and a high band by
+the caller's pitch, and claws leave a scent that triggers alarm calls:
 
 ```
-E(x)  = voice(x) · A_Σ(x)            (sound emission)
-Sf    = Kfar * Φ                     (sensed food)
-Ss    = Kfar * E                     (sensed sound)
+T_prev = claw scent sensed in the previous step (sense_b.y)
+call   = min(voice + alarm · min(8·T_prev, 1) · (1 − claw), 1.5)
+E      = call · A_Σ
+sense_a = (Kfar * Φ,  Kfar * (E · (1 − pitch)))       = (Sf, S_lo)
+sense_b = (Kfar * (E · pitch),  Kfar * (claw · A_Σ))  = (S_hi, T)
+H      = (1 − tune) · S_lo + tune · S_hi              (what this cell hears)
 ```
 
 `Kfar` is a Gaussian with `σ_far = far·R/3`, truncated at radius `far·R` (wrapped offsets),
@@ -109,7 +115,7 @@ The flow for channel `c` is:
 ```
 F_c = (1 − α) ∇Aff_c − α ∇A_Σ
       + w_eye · eye(x) · clip1(∇Sf / (Sf + 0.05))
-      + w_ear · ear(x) · clip1(∇Ss / (Ss + 0.05))
+      + w_ear · ear(x) · clip1(∇H / (H + 0.05))
 ```
 
 `clip1(v)` scales `v` down so that `|v| ≤ 1`. The displacement is:
@@ -138,8 +144,23 @@ m(y)     = Σ_c A_c(y) · w_c(y)
 This conserves mass exactly: each source's box always lies within the neighborhood because
 `|p| ≤ 1 − s`.
 
-**Genome inheritance.** Among the neighbors with `m(y) > 0`, pick `y*` with probability
-proportional to `m(y) · (1 + claw_bias · claw(y))`, using a per-cell random number. Then
+**Compatibility gate.** This applies when the destination is occupied
+(`Σ_c A_c(x) > 0.02`).
+
+1. A source `y` is *foreign* if `dist(g(x), g(y)) > compat`, where:
+
+   ```
+   dist = Σ_{k<4} |Δh_k| + 3·|Δpitch| + 0.5·|Δtimbre|
+   ```
+
+   Pitch weighs most, so different "languages" are incompatible.
+2. Each foreign contribution is scaled by `1 − kill`, with
+   `kill = clamp(combat · claw(x) · dt, 0, 1)`: the resident's claws destroy foreign matter.
+3. The destroyed mass is added to `Φ(x)`.
+
+**Genome inheritance.** Among the neighbors with `m(y) > 0` (after combat), pick `y*` with
+probability proportional to `m(y) · (1 + claw_bias · claw(y) · foreign(y))`, using a per-cell
+random number. Foreign claws win contested cells, which amounts to assimilation. Then
 `g'(x) = g(y*)`. If no neighbor contributes, `g'(x) = g(x)`.
 
 **Walls.** If `W(x) > 0.5`, then `A'(x) = 0`. A small amount of mass is lost to walls.
@@ -152,7 +173,7 @@ This step is pointwise and runs only if ecology is enabled. It uses `A'`, `g'`, 
 **Eating:**
 
 ```
-eat = min(Φ, eat · mouth · Φ · min(A'_Σ, 1) · (1 + social · Ss/(Ss + 0.1)) · dt)
+eat = min(Φ, eat · mouth · Φ · min(A'_Σ, 1) · (1 + social · H/(H + 0.1)) · dt)
 Φ  -= eat
 A'_c += eat · A'_c / A'_Σ        (or into channel 0 if A'_Σ = 0)
 ```
@@ -196,11 +217,32 @@ Budding is decided on the CPU from creature tracking and runs as one GPU operati
 The offspring is a mutated half-copy of the parent. All cells of the offspring share the
 same mutation, so it behaves as one organism.
 
+## Mating
+
+Mating is triggered by the CPU from tracking.
+
+**When it happens:** two creatures mate when all of these hold:
+
+* their bounding spheres touch,
+* they are *compatible* (`dist` of their mean genomes ≤ `compat`),
+* both are heavier than half of `bud_mass`,
+* both are past their cooldown.
+
+**What it does:**
+
+1. Build the child genome: each gene comes from parent A or parent B at random (uniform
+   crossover), plus the `bud_mutation` noise.
+2. The heavier parent buds the child to the side, perpendicular to the line between the
+   parents. The bud delta is set so that `g(child) = child genome`.
+
+Because compatible matter mixes peacefully while foreign matter fights, populations that are
+separated by walls drift apart in pitch ("language") and later treat each other as hostile.
+
 ## Creature tracking
 
 Tracking runs on a coarse grid of 32³ cells (`f = N/32` cells per block).
 
-1. The GPU sums mass and mass-weighted traits per block.
+1. The GPU sums mass and the mass-weighted genome per block.
 2. The CPU finds 26-connected periodic components with `block mass / f³ > 0.03`.
 3. For each component it computes the mass, the periodic center of mass, the effective radius
    `r = cbrt(3 · cells / 4π)`, and the mean traits.
