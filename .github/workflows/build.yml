@@ -75,7 +75,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install software Vulkan (lavapipe)
-        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libxkbcommon-x11-0
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libxkbcommon-x11-0 libasound2-dev pkg-config
       - name: Tests (including GPU tests on lavapipe)
         run: cargo test --release -- --nocapture
       - name: Build

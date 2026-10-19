@@ -238,6 +238,25 @@ impl Tracker {
         self.next_id = next_id;
     }
 
+    /// The world was translated by `shift` cells (follow mode).
+    pub fn shift(&mut self, shift: [i32; 3]) {
+        let n = self.n as f32;
+        if n <= 0.0 {
+            return;
+        }
+        let mv = |c: &mut [f32; 3]| {
+            for k in 0..3 {
+                c[k] = (c[k] + shift[k] as f32).rem_euclid(n);
+            }
+        };
+        for c in &mut self.creatures {
+            mv(&mut c.center);
+        }
+        for e in &mut self.expected {
+            mv(&mut e.0);
+        }
+    }
+
     /// Record that an offspring was just placed at `center` (cell coords).
     pub fn expect_offspring(&mut self, center: [f32; 3], parent: u64, generation: u64) {
         self.expected.push((center, parent, generation));

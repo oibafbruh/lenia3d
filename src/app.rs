@@ -1,7 +1,11 @@
 //! Interactive application: window, input handling, UI and the frame loop.
 
+use crate::audio::{pentatonic, Audio, Sfx, VoiceParams, MAX_VOICES};
 use crate::gpu;
 use crate::headless::{save_png, Options};
+use crate::life::{ReproKind, ReproOp};
+use crate::sim::flow::{gene, EcologyParams, FlowBrush, FlowParams};
+use crate::tracker::LifeEvent;
 use crate::render::camera::OrbitCamera;
 use crate::render::{Overlay, RenderMode, Renderer};
 use crate::sim::preset::{builtin_presets, Preset};
@@ -76,6 +80,16 @@ struct MassReader {
     state: Arc<AtomicU8>, // 0 idle, 1 in flight, 2 ready
 }
 
+/// Asynchronous readback of the coarse tracking grid.
+struct TrackReader {
+    staging: wgpu::Buffer,
+    m: u32,
+    layout: u64,
+    generation: u64,
+    roll_at_request: u64,
+    state: Arc<AtomicU8>, // 0 idle, 1 in flight, 2 ready
+}
+
 #[derive(Default)]
 struct Input {
     left: bool,
@@ -87,6 +101,8 @@ struct Input {
     keys: std::collections::HashSet<KeyCode>,
     last_paint: Option<Vec3>,
     stamped: bool,
+    press_pos: Option<Vec2>,
+    stroke_genome: Option<crate::sim::flow::Genome>,
 }
 
 struct State {
@@ -119,6 +135,11 @@ struct State {
     roll_count: u64,
     pending_roll: Option<[i32; 3]>,
     floor_offset: Vec2,
+    audio: Audio,
+    track_reader: Option<TrackReader>,
+    pending_ops: Vec<ReproOp>,
+    last_audio: f64,
+    sfx_budget: f32,
 }
 
 fn data_dir() -> PathBuf {
@@ -192,6 +213,20 @@ impl State {
                 chan_loaded = true;
             }
         }
+        if let Some(file) = &opts.preset_file {
+            match std::fs::read_to_string(file).map_err(anyhow::Error::from).and_then(|src| {
+                Ok(match serde_json::from_str::<Preset>(&src) {
+                    Ok(p) => vec![p],
+                    Err(_) => serde_json::from_str::<Vec<Preset>>(&src)?,
+                })
+            }) {
+                Ok(mut extra) => {
+                    extra.extend(presets);
+                    presets = extra;
+                }
+                Err(e) => log::warn!("could not load {file}: {e}"),
+            }
+        }
         let max_n = gpu::Gpu::max_grid_size(&device);
         let mut ui = UiState::new(presets);
         ui.chan_loaded = chan_loaded;
@@ -215,6 +250,12 @@ impl State {
         ui.rule = world.sim.params().clone();
         ui.follow = p.pattern().is_some();
         ui.set_status(format!("Loaded \"{}\"", p.name), 0.0);
+        if let Some(f) = &world.sim.flow {
+            ui.flow_params = f.params.clone();
+            ui.eco = f.eco.clone();
+        }
+        ui.traits = world.traits.clone();
+        let audio = Audio::new();
 
         let mut camera = OrbitCamera::default();
         if let Some(pat) = p.pattern() {
@@ -253,7 +294,66 @@ impl State {
             roll_count: 0,
             pending_roll: None,
             floor_offset: Vec2::ZERO,
+            audio,
+            track_reader: None,
+            pending_ops: Vec::new(),
+            last_audio: 0.0,
+            sfx_budget: 3.0,
         })
+    }
+
+    /// Copy the world's Flow settings into the editable UI state.
+    fn pull_flow_ui(&mut self) {
+        if let Some(f) = &self.world.sim.flow {
+            self.ui.flow_params = f.params.clone();
+            self.ui.eco = f.eco.clone();
+        }
+        self.ui.traits = self.world.traits.clone();
+    }
+
+    /// World-space center and radius of a tracked creature.
+    fn creature_world(&self, c: &crate::tracker::Creature) -> (Vec3, f32) {
+        let n = self.world.n() as f32;
+        let p = c.center.map(|v| (v + 0.5) / n * 2.0 - 1.0);
+        (Vec3::new(p[0], p[1], p[2]), c.radius * 2.0 / n)
+    }
+
+    /// Stereo pan and distance attenuation for a world position.
+    fn listen(&self, p: Vec3) -> (f32, f32) {
+        let eye = self.camera.eye();
+        let (right, _, _) = self.camera.basis();
+        let d = (p - eye).length().max(1e-3);
+        let pan = ((p - eye).dot(right) / d * 1.6).clamp(-1.0, 1.0);
+        (pan, 1.0 / (1.0 + (d / 1.8).powi(2)))
+    }
+
+    fn cell_to_world(&self, c: [f32; 3]) -> Vec3 {
+        let n = self.world.n() as f32;
+        let p = c.map(|v| (v + 0.5) / n * 2.0 - 1.0);
+        Vec3::new(p[0], p[1], p[2])
+    }
+
+    fn pick_creature(&mut self) {
+        let (o, d) = self.camera.ray(self.cursor_ndc(), self.aspect());
+        let mut best: Option<(f32, u64)> = None;
+        for c in &self.world.tracker.creatures {
+            let (center, r) = self.creature_world(c);
+            let r = r * 1.15 + 0.01;
+            let oc = o - center;
+            let b = oc.dot(d);
+            let h = b * b - (oc.dot(oc) - r * r);
+            if h >= 0.0 {
+                let t = -b - h.sqrt();
+                if t > 0.0 && best.is_none_or(|(bt, _)| t < bt) {
+                    best = Some((t, c.id));
+                }
+            }
+        }
+        let now = self.now();
+        self.ui.selected_creature = best.map(|b| b.1);
+        if let Some(id) = self.ui.selected_creature {
+            self.ui.set_status(format!("Selected creature #{id} (Follow keeps it centered)"), now);
+        }
     }
 
     fn now(&self) -> f64 {
@@ -342,6 +442,13 @@ impl State {
                         if pressed {
                             self.input.last_paint = None;
                             self.input.stamped = false;
+                            self.input.press_pos = Some(self.input.cursor);
+                            self.input.stroke_genome = self.world.is_flow().then(|| self.world.random_genome());
+                        } else {
+                            let clicked = self.input.press_pos.take().is_some_and(|p| (p - self.input.cursor).length() < 4.0);
+                            if clicked && self.ui.tool == Tool::View {
+                                self.pick_creature();
+                            }
                         }
                     }
                     MouseButton::Right => self.input.right = pressed,
@@ -418,6 +525,20 @@ impl State {
                 self.window.set_fullscreen(fs);
             }
             KeyCode::F12 => self.apply(Action::Screenshot),
+            KeyCode::KeyP => self.ui.show_population = !self.ui.show_population,
+            KeyCode::KeyV => {
+                self.ui.audio.muted = !self.ui.audio.muted;
+                let msg = if self.ui.audio.muted { "Sound off" } else { "Sound on" };
+                self.ui.set_status(msg, now);
+            }
+            KeyCode::Digit8 | KeyCode::Digit9 | KeyCode::Digit0 if self.world.is_flow() => {
+                self.ui.tool = match code {
+                    KeyCode::Digit8 => Tool::Food,
+                    KeyCode::Digit9 => Tool::Toxic,
+                    _ => Tool::Founder,
+                };
+                self.ui.set_status(format!("Tool: {}", self.ui.tool.label()), now);
+            }
             KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6 | KeyCode::Digit7 => {
                 let i = match code {
                     KeyCode::Digit1 => 0,
@@ -508,9 +629,98 @@ impl State {
                     self.ui.rule = self.world.sim.params().clone();
                     self.ui.running = true;
                     self.ui.follow = p.pattern().is_some();
+                    self.ui.selected_creature = None;
                     self.frame_preset(&p);
+                    self.pull_flow_ui();
                     self.ui.set_status(format!("Loaded \"{}\"", p.name), now);
                 }
+            }
+            Action::SetMode(flow) => {
+                let found = self.ui.presets.iter().position(|p| p.is_flow() == flow && (flow || p.kind == "soup"));
+                match found {
+                    Some(i) => return self.apply(Action::LoadPreset(i)),
+                    None => {
+                        let cfg = flow.then(|| (FlowParams::default(), EcologyParams::default()));
+                        self.world.set_flow(device, queue, cfg);
+                        self.world.reset(device, queue);
+                        self.pull_flow_ui();
+                    }
+                }
+            }
+            Action::SeedFounders => {
+                let n = self.world.n() as f32;
+                let r = self.world.sim.params().R;
+                let mut enc = device.create_command_encoder(&Default::default());
+                for _ in 0..4 {
+                    let c = [self.seed_rng.f32() * n, self.seed_rng.f32() * n, self.seed_rng.f32() * n];
+                    let genes = self.world.random_genome();
+                    let seed = self.seed_rng.next_u32();
+                    self.world.seed_founder(device, &mut enc, c, r, 0.7, &genes, seed);
+                }
+                queue.submit([enc.finish()]);
+                self.ui.set_status("Added 4 founders", now);
+            }
+            Action::RefillFood | Action::ResetGround => {
+                if let Some(f) = &self.world.sim.flow {
+                    if matches!(action, Action::ResetGround) {
+                        f.reset_fertility(queue, self.world.n());
+                    }
+                    let mut enc = device.create_command_encoder(&Default::default());
+                    f.reset_food(&mut enc);
+                    queue.submit([enc.finish()]);
+                }
+            }
+            Action::KillSelected => {
+                if let Some(c) = self.ui.selected_creature.and_then(|id| self.world.tracker.get(id)).cloned() {
+                    let mut enc = device.create_command_encoder(&Default::default());
+                    self.world.sim.brush(device, &mut enc, BrushMode::Erase, None, c.center, c.radius * 1.4 + 2.0, 1.0, 0);
+                    queue.submit([enc.finish()]);
+                    self.ui.selected_creature = None;
+                }
+            }
+            Action::CloneSelected => {
+                if let Some(c) = self.ui.selected_creature.and_then(|id| self.world.tracker.get(id)).cloned() {
+                    let mut delta = [0.0f32; 16];
+                    let size = self.ui.eco.bud_mutation;
+                    for d in delta.iter_mut() {
+                        *d = (self.seed_rng.f32() * 2.0 - 1.0) * size * 1.7;
+                    }
+                    let rbox = c.radius * 1.3 + 1.0;
+                    let len = (2.0 * rbox + 2.0).min(self.world.n() as f32 / 2.0 - 1.0);
+                    let a = self.seed_rng.f32() * std::f32::consts::TAU;
+                    let offset = [(a.cos() * len).round() as i32, 0, (a.sin() * len).round() as i32];
+                    let child = [0, 1, 2].map(|k| c.center[k] + offset[k] as f32);
+                    let op = ReproOp {
+                        kind: ReproKind::Bud,
+                        parent: c.id,
+                        partner: None,
+                        center: c.center,
+                        radius: rbox,
+                        offset,
+                        delta,
+                        child_center: child,
+                        child_pitch: c.genome[gene::PITCH],
+                    };
+                    self.world.tracker.expect_offspring(child, c.id, self.world.sim.generation);
+                    self.pending_ops.push(op);
+                }
+            }
+            Action::Islands => {
+                let n = self.world.n() as usize;
+                let mut w = self.world.sim.download_wall(device, queue);
+                for z in 0..n {
+                    for y in 0..n {
+                        for x in 0..n {
+                            let wall = |v: usize| v < 2 || (v >= n / 2 && v < n / 2 + 2);
+                            if wall(x) || wall(z) {
+                                w[(z * n + y) * n + x] = 1.0;
+                            }
+                        }
+                    }
+                }
+                self.world.sim.upload_wall(queue, &w);
+                self.world.has_walls = true;
+                self.ui.set_status("Four islands: separated populations will drift apart (watch their languages)", now);
             }
             Action::Reset => {
                 self.world.reset(device, queue);
@@ -674,6 +884,35 @@ impl State {
         let r = self.ui.brush_radius;
         let center = self.world_to_cell(p);
         let tool = self.ui.tool;
+        if self.world.is_flow() && matches!(tool, Tool::Food | Tool::Toxic | Tool::Founder | Tool::Noise | Tool::Paint) {
+            let genes = self.input.stroke_genome.unwrap_or_else(|| self.world.default_genome());
+            let Some(f) = &self.world.sim.flow else { return };
+            let sb = self.world.sim.flow_buffers();
+            match tool {
+                Tool::Founder => {
+                    if !self.input.stamped {
+                        self.input.stamped = true;
+                        let r = self.world.sim.params().R;
+                        f.brush(&self.device, enc, &sb, FlowBrush::Seed, center, r, 0.0, 0.7, &genes, self.seed_rng.next_u32());
+                    }
+                }
+                Tool::Food | Tool::Toxic => {
+                    let mode = if tool == Tool::Food { FlowBrush::Food } else { FlowBrush::Toxic };
+                    f.brush(&self.device, enc, &sb, mode, center, r, self.ui.brush_strength, 0.0, &genes, 0);
+                }
+                _ => {
+                    if let Some(last) = self.input.last_paint {
+                        if (last - p).length() < self.brush_world_radius() * 0.35 {
+                            return;
+                        }
+                    }
+                    self.input.last_paint = Some(p);
+                    f.brush(&self.device, enc, &sb, FlowBrush::Seed, center, r, 0.0, 0.6, &genes, self.seed_rng.next_u32());
+                }
+            }
+            self.volume_dirty = true;
+            return;
+        }
         if tool == Tool::Creature {
             if !self.input.stamped {
                 self.input.stamped = true;
@@ -699,7 +938,8 @@ impl State {
             Tool::Paint => BrushMode::Add,
             Tool::Erase => BrushMode::Erase,
             Tool::Wall => BrushMode::Wall,
-            _ => BrushMode::Unwall,
+            Tool::Unwall => BrushMode::Unwall,
+            _ => return,
         };
         if tool == Tool::Wall {
             self.world.has_walls = true;
@@ -707,6 +947,103 @@ impl State {
         let seed = self.seed_rng.next_u32();
         self.world.sim.brush(&self.device, enc, mode, self.ui.brush_channel, center, r, self.ui.brush_strength, seed);
         self.volume_dirty = true;
+    }
+
+    fn poll_track(&mut self) {
+        let Some(r) = &self.track_reader else { return };
+        if r.state.load(Ordering::Acquire) != 2 {
+            return;
+        }
+        let vals: Vec<f32> = {
+            let view = r.staging.slice(..).get_mapped_range().expect("mapped");
+            bytemuck::cast_slice(&view).to_vec()
+        };
+        let (m, generation, stale) = (r.m, r.generation, r.roll_at_request != self.roll_count);
+        r.staging.unmap();
+        r.state.store(0, Ordering::Release);
+        let layout = self.world.sim.layout_id() ^ ((self.world.n() as u64) << 48);
+        if stale || r.layout != layout {
+            return;
+        }
+        let f = self.world.n() / m;
+        let ops = self.world.life_update(&vals, m, f, generation);
+        for op in &ops {
+            let (pan, att) = self.listen(self.cell_to_world(op.child_center));
+            let freq = pentatonic(op.child_pitch);
+            let sfx = match op.kind {
+                ReproKind::Bud => Sfx::Bud { freq, pan },
+                ReproKind::Mate => Sfx::Mate { freq, pan },
+            };
+            if att > 0.05 {
+                self.audio.play(sfx);
+            }
+        }
+        if !ops.is_empty() {
+            let (buds, mates) = crate::world::births(&ops);
+            log::debug!("reproduction: {buds} buds, {mates} matings");
+        }
+        self.pending_ops.extend(ops);
+        let fresh_world = self.world.tracker.history.len() < 4;
+        for e in self.world.tracker.drain_events() {
+            if fresh_world || self.sfx_budget < 1.0 {
+                continue;
+            }
+            let (center, pitch, death) = match e {
+                LifeEvent::Born { center, pitch, .. } => (center, pitch, false),
+                LifeEvent::Died { center, pitch, .. } => (center, pitch, true),
+            };
+            let (pan, att) = self.listen(self.cell_to_world(center));
+            if att < 0.08 {
+                continue;
+            }
+            self.sfx_budget -= 1.0;
+            let freq = pentatonic(pitch);
+            self.audio.play(if death { Sfx::Death { freq, pan } } else { Sfx::Birth { freq, pan } });
+        }
+    }
+
+    /// Send the loudest creature voices to the synthesizer.
+    fn update_audio(&mut self, now: f64) {
+        if !self.audio.available {
+            return;
+        }
+        let flow = self.world.is_flow();
+        let mut voices: Vec<VoiceParams> = self
+            .world
+            .tracker
+            .creatures
+            .iter()
+            .filter_map(|c| {
+                let g = &c.genome;
+                let (voice, pitch, timbre, scream) = if flow {
+                    let scream = (-c.growth * 0.4).clamp(0.0, 1.0) * g[gene::ALARM];
+                    (g[gene::VOICE], g[gene::PITCH], g[gene::TIMBRE], scream)
+                } else {
+                    // classic Lenia: bigger creatures sing lower, moving ones louder
+                    let pitch = (1.0 - c.radius / 24.0).clamp(0.0, 1.0);
+                    (0.25 + (c.speed() * 6.0).min(0.6), pitch, 0.3, 0.0)
+                };
+                if voice < 0.05 && scream < 0.05 {
+                    return None;
+                }
+                let (center, _) = self.creature_world(c);
+                let (pan, att) = self.listen(center);
+                let size = (c.mass.max(1.0)).powf(0.2) / 4.0;
+                Some(VoiceParams {
+                    id: c.id,
+                    freq: pentatonic(pitch),
+                    amp: (voice.max(scream) * att * size.clamp(0.4, 1.5)).min(1.0),
+                    pan,
+                    timbre,
+                    voice,
+                    scream,
+                })
+            })
+            .collect();
+        voices.sort_by(|a, b| b.amp.total_cmp(&a.amp));
+        voices.truncate(MAX_VOICES);
+        let life = (self.world.tracker.creatures.len() as f32 / 20.0).min(1.0);
+        self.audio.update(voices, now, &self.ui.audio, life, 55.0);
     }
 
     fn poll_mass(&mut self) {
@@ -730,7 +1067,8 @@ impl State {
         self.mass = stats.iter().map(|s| s.mass).collect();
         // follow: roll the periodic world so the center of mass sits in the middle
         if self.ui.follow && fresh && !self.world.has_walls && self.pending_roll.is_none() {
-            if let Some(c) = crate::sim::combined_center(&stats, n) {
+            let selected = self.ui.selected_creature.and_then(|id| self.world.tracker.get(id)).map(|c| c.center.map(|v| v as f64));
+            if let Some(c) = selected.or_else(|| crate::sim::combined_center(&stats, n)) {
                 let half = n as f64 / 2.0;
                 let shift = c.map(|v| {
                     let d = (half - v).rem_euclid(n as f64);
@@ -774,6 +1112,8 @@ impl State {
         }
         let _ = self.device.poll(wgpu::PollType::Poll);
         self.poll_mass();
+        self.poll_track();
+        self.sfx_budget = (self.sfx_budget + dt * 3.0).min(4.0);
 
         // camera fly keys
         let k = &self.input.keys;
@@ -802,7 +1142,16 @@ impl State {
         self.camera.update(dt);
 
         // UI
+        let selected = self.ui.selected_creature.and_then(|id| self.world.tracker.get(id)).cloned();
+        if self.ui.selected_creature.is_some() && selected.is_none() && self.world.tracker.history.len() > 2 {
+            // the selected creature died or merged
+            self.ui.selected_creature = None;
+        }
         let info = FrameInfo {
+            flow: self.world.is_flow(),
+            tracker: &self.world.tracker,
+            selected,
+            audio_status: self.audio.status.clone(),
             fps: self.fps,
             steps_per_sec: self.steps_counter.2,
             generation: self.world.sim.generation,
@@ -825,6 +1174,25 @@ impl State {
             self.world.sim.set_params(&self.device, &self.queue, self.ui.rule.clone());
             self.ui.rule = self.world.sim.params().clone();
         }
+        // Flow-mode settings edited in the UI
+        if let Some(f) = self.world.sim.flow.as_mut() {
+            if f.params != self.ui.flow_params {
+                let rebuild = f.params.far != self.ui.flow_params.far;
+                f.params = self.ui.flow_params.clone();
+                if rebuild {
+                    f.invalidate();
+                }
+            }
+            if f.eco != self.ui.eco {
+                f.eco = self.ui.eco.clone();
+            }
+        }
+        self.world.traits = self.ui.traits.clone();
+        self.world.sim.update_flow(&self.device, &self.queue);
+        if now - self.last_audio > 0.1 {
+            self.last_audio = now;
+            self.update_audio(now);
+        }
         let want_present = if self.ui.vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
         if self.config.present_mode != want_present {
             self.config.present_mode = want_present;
@@ -844,6 +1212,7 @@ impl State {
 
         if let Some(shift) = self.pending_roll.take() {
             self.world.sim.encode_roll(&self.device, &mut enc, shift);
+            self.world.tracker.shift(shift);
             self.roll_count += 1;
             let cell = 2.0 / self.world.n() as f32;
             let off = self.floor_offset + Vec2::new(shift[0] as f32, shift[2] as f32) * cell;
@@ -875,6 +1244,48 @@ impl State {
         if el.as_secs_f32() >= 0.5 {
             self.steps_counter.2 = self.steps_counter.1 as f32 / el.as_secs_f32();
             self.steps_counter = (now_i, 0, self.steps_counter.2);
+        }
+
+        if !self.pending_ops.is_empty() {
+            let ops = std::mem::take(&mut self.pending_ops);
+            self.world.apply_ops(&self.device, &mut enc, &ops);
+            self.volume_dirty = true;
+        }
+
+        // creature tracking readback
+        let mut track_submitted = false;
+        if self.frame_index % 6 == 3 {
+            let (m, _) = crate::sim::track_grid(self.world.n());
+            let layout = self.world.sim.layout_id() ^ ((self.world.n() as u64) << 48);
+            let bytes = (m as u64).pow(3) * crate::sim::TRACK_FLOATS as u64 * 4;
+            let idle = self.track_reader.as_ref().is_none_or(|r| r.state.load(Ordering::Acquire) == 0);
+            if idle && self.track_reader.as_ref().is_none_or(|r| r.layout != layout || r.m != m) {
+                self.track_reader = Some(TrackReader {
+                    staging: self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("track staging"),
+                        size: bytes,
+                        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                    m,
+                    layout,
+                    generation: 0,
+                    roll_at_request: 0,
+                    state: Arc::new(AtomicU8::new(0)),
+                });
+            }
+            let generation = self.world.sim.generation;
+            let roll_count = self.roll_count;
+            if let Some(r) = &mut self.track_reader {
+                if r.layout == layout && r.state.load(Ordering::Acquire) == 0 {
+                    let (buf, _, _) = self.world.sim.encode_track(&self.device, &mut enc);
+                    enc.copy_buffer_to_buffer(buf, 0, &r.staging, 0, bytes);
+                    r.generation = generation;
+                    r.roll_at_request = roll_count;
+                    r.state.store(1, Ordering::Release);
+                    track_submitted = true;
+                }
+            }
         }
 
         // statistics (mass, center of mass) every few frames
@@ -922,6 +1333,8 @@ impl State {
             None
         };
         let overlay = Overlay { plane_y: painting.then_some(self.ui.plane_y), brush, floor_offset: self.floor_offset.into() };
+        let creatures = self.world.gpu_creatures(now, self.ui.selected_creature);
+        self.renderer.set_creatures(&self.queue, &creatures);
         let size = (self.config.width, self.config.height);
         self.renderer.render(&self.device, &self.queue, &mut enc, &view, size, &self.camera, &self.ui.settings, &overlay, now as f32);
 
@@ -956,6 +1369,14 @@ impl State {
             self.egui_renderer.free_texture(id);
         }
         self.queue.submit(extra.into_iter().chain([enc.finish()]));
+        if track_submitted {
+            if let Some(r) = &self.track_reader {
+                let state = r.state.clone();
+                r.staging.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+                    state.store(if res.is_ok() { 2 } else { 0 }, Ordering::Release);
+                });
+            }
+        }
         if mass_submitted {
             if let Some(r) = &self.mass_reader {
                 let state = r.state.clone();

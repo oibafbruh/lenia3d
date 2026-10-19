@@ -9,3 +9,4 @@ pub mod app;
 pub mod ui;
 pub mod tracker;
 pub mod life;
+pub mod audio;
