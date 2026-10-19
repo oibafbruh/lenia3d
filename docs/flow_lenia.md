@@ -159,10 +159,16 @@ This conserves mass exactly: each source's box always lies within the neighborho
    `kill = clamp(combat · claw(x) · dt, 0, 1)`: the resident's claws destroy foreign matter.
 3. The destroyed mass is added to `Φ(x)`.
 
-**Genome inheritance.** Among the neighbors with `m(y) > 0` (after combat), pick `y*` with
-probability proportional to `m(y) · (1 + claw_bias · claw(y) · foreign(y))`, using a per-cell
-random number. Foreign claws win contested cells, which amounts to assimilation. Then
-`g'(x) = g(y*)`. If no neighbor contributes, `g'(x) = g(x)`.
+**Genome inheritance.** Among the neighbors with `m(y) > 0` (after combat), each source gets
+the weight `w(y) = m(y) · (1 + claw_bias · claw(y) · foreign(y))`.
+
+* If any source is foreign, the cell is contested: `y*` is the source with the largest
+  `w(y)`. This keeps battle fronts clean instead of speckled, and foreign claws win, which
+  amounts to assimilation.
+* If all sources are compatible (kin), pick `y*` with probability proportional to `w(y)`,
+  using a per-cell random number.
+
+Then `g'(x) = g(y*)`. If no neighbor contributes, `g'(x) = g(x)`.
 
 **Walls.** If `W(x) > 0.5`, then `A'(x) = 0`. A small amount of mass is lost to walls.
 

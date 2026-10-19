@@ -49,7 +49,7 @@ pub struct FlowParams {
 
 impl Default for FlowParams {
     fn default() -> Self {
-        Self { theta: 2.0, n: 2.0, s: 0.65, far: 2.5, w_eye: 1.0, w_ear: 1.0, claw_bias: 4.0, compat: 0.6, combat: 1.0 }
+        Self { theta: 2.0, n: 2.0, s: 0.65, far: 2.5, w_eye: 6.0, w_ear: 2.0, claw_bias: 4.0, compat: 0.6, combat: 0.5 }
     }
 }
 

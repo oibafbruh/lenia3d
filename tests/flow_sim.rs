@@ -266,3 +266,34 @@ fn compatibility_gate_combat() {
     let (m0, m1, dfood) = run(0.1);
     assert!(((m1 - m0) / m0).abs() < 1e-4 && dfood.abs() < 1e-3, "same language must not fight: {m0} -> {m1}, food {dfood}");
 }
+
+/// Cross-check against the independent NumPy reference (tools/flow_ref.py,
+/// fixture written by tools/flow_fixture.py): one step, ecology off, per-cell
+/// kernel genes that differ from the rule's h.
+#[test]
+fn flow_step_matches_numpy_fixture() {
+    let Some(g) = gpu() else { return };
+    let src = include_str!("fixtures/flow_step_16.json");
+    let v: serde_json::Value = serde_json::from_str(src).unwrap();
+    let n = v["N"].as_u64().unwrap() as u32;
+    let rule: LeniaParams = serde_json::from_value(v["rule"].clone()).unwrap();
+    let flow: FlowParams = serde_json::from_value(v["flow"].clone()).unwrap();
+    let floats = |k: &str| -> Vec<f32> { v[k].as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect() };
+    let genome: [f32; 16] = floats("genome").try_into().unwrap();
+    let a_in = floats("A_in");
+    let a_out = floats("A_out");
+    let mut sim = Simulation::new(&g.device, n, rule);
+    sim.enable_flow(&g.device, &g.queue, flow, eco_off());
+    sim.upload(&g.queue, 0, &a_in);
+    let mut enc = g.device.create_command_encoder(&Default::default());
+    sim.flow.as_ref().unwrap().brush(&g.device, &mut enc, &sim.flow_buffers(), FlowBrush::Fill, [0.0; 3], 1.0, 0.0, 0.0, &genome, 0);
+    g.queue.submit([enc.finish()]);
+    sim.update_flow(&g.device, &g.queue);
+    let mut enc = g.device.create_command_encoder(&Default::default());
+    sim.encode_steps(&mut enc, 1);
+    g.queue.submit([enc.finish()]);
+    let got = sim.download(&g.device, &g.queue, 0);
+    let err = got.iter().zip(&a_out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    let change = a_in.iter().zip(&a_out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(err < 1e-3 * change.max(1.0), "max error {err} (max change {change})");
+}

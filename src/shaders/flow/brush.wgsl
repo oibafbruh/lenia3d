@@ -60,17 +60,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 0u: {
             let t = 1.0 - d;
             let w = t * t * (3.0 - 2.0 * t);
+            // the genome is written only where this blob dominates the cell
             var placed = false;
             for (var ch = 0u; ch < p.nch; ch++) {
                 let r = vec2<f32>(pcg3d(c ^ vec3<u32>(p.seed + ch * 7919u, p.seed * 747796405u, p.seed * 2891336453u + ch)).xy >> vec2<u32>(8u)) / 16777216.0;
                 let v = select(0.0, r.y * w, r.x < p.density);
                 if (v > 0.0) {
-                    placed = true;
                     if (ch == 0u) {
+                        placed = placed || v >= a0[i];
                         a0[i] = max(a0[i], v);
                     } else if (ch == 1u) {
+                        placed = placed || v >= a1[i];
                         a1[i] = max(a1[i], v);
                     } else {
+                        placed = placed || v >= a2[i];
                         a2[i] = max(a2[i], v);
                     }
                 }

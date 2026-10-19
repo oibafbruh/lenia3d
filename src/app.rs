@@ -636,7 +636,13 @@ impl State {
                 }
             }
             Action::SetMode(flow) => {
-                let found = self.ui.presets.iter().position(|p| p.is_flow() == flow && (flow || p.kind == "soup"));
+                // Evolution mode opens with the grazing ecosystem; Classic with the first soup.
+                let found = self
+                    .ui
+                    .presets
+                    .iter()
+                    .position(|p| flow && p.name == "Grazing Drift")
+                    .or_else(|| self.ui.presets.iter().position(|p| p.is_flow() == flow && (flow || p.kind == "soup")));
                 match found {
                     Some(i) => return self.apply(Action::LoadPreset(i)),
                     None => {

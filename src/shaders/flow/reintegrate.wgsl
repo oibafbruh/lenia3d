@@ -52,6 +52,9 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3
     let occupied = resident > 0.02;
     let kill = clamp(fp.combat * r3.x * fp.dt, 0.0, 1.0);
     var destroyed = 0.0;
+    var any_foreign = false;
+    var best_w = 0.0;
+    var best = i;
     let inv = 1.0 / (8.0 * s * s * s);
     var acc = vec3<f32>(0.0);
     var seed = pcg(i ^ pcg(state[0] * 2654435761u));
@@ -91,7 +94,12 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3
                     // foreign claws win contested cells (assimilation)
                     let wt = m * (1.0 + fp.claw_bias * s3.x * foreign);
                     wsum += wt;
-                    // weighted reservoir sampling
+                    any_foreign = any_foreign || foreign > 0.0;
+                    if (wt > best_w) {
+                        best_w = wt;
+                        best = j;
+                    }
+                    // weighted reservoir sampling (used when all sources are kin)
                     if (wt > 0.0 && rnd(&seed) * wsum < wt) {
                         chosen = j;
                     }
@@ -103,6 +111,11 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3
     }
     if (destroyed > 0.0) {
         food[i] += destroyed;
+    }
+    // a contested cell goes to the strongest contributor (clean fronts, no
+    // speckled mixtures); kin mix stochastically
+    if (any_foreign) {
+        chosen = best;
     }
     n0[i] = acc.x;
     if (fp.nch > 1u) {

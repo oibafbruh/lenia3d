@@ -9,6 +9,9 @@ use crate::world::World;
 use anyhow::{anyhow, Result};
 use std::time::Instant;
 
+/// Print population statistics every this many steps in headless runs (0 = off).
+pub static LOG_EVERY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub struct Options {
     pub size: u32,
     pub steps: u32,
@@ -109,6 +112,16 @@ fn run_steps(g: &Gpu, world: &mut World, steps: u32) {
         done += k;
         if world.is_flow() {
             births += life_tick(g, world);
+            if LOG_EVERY.load(std::sync::atomic::Ordering::Relaxed) > 0
+                && (done as u64) % LOG_EVERY.load(std::sync::atomic::Ordering::Relaxed) < k as u64
+            {
+                if let Some(s) = world.tracker.history.last() {
+                    eprintln!(
+                        "  step {:>6}  creatures {:>3}  mass {:>8.0}  food {:>8.0}  births {births:>3}  eye {:.2} ear {:+.2} voice {:.2} mouth {:.2} claw {:.2} alarm {:.2}  languages {}",
+                        done, s.count, s.mass, s.food, s.eye, s.ear, s.voice, s.mouth, s.claw, s.alarm, s.languages
+                    );
+                }
+            }
         }
     }
     if world.is_flow() {
