@@ -132,6 +132,11 @@ fn ign(p: vec2<f32>) -> f32 {
 }
 
 fn palette(x: f32) -> vec3<f32> {
+    // stops are sRGB; convert to linear for shading
+    return pow(palette_srgb(x), vec3<f32>(2.2));
+}
+
+fn palette_srgb(x: f32) -> vec3<f32> {
     let t = clamp(x, 0.0, 1.0);
     let c0 = vec3<f32>(0.03, 0.05, 0.18);
     let c1 = vec3<f32>(0.05, 0.42, 0.62);
