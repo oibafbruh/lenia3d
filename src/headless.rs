@@ -21,6 +21,8 @@ pub struct Options {
     pub yaw: f32,
     pub dist: f32,
     pub render: String,
+    /// Extra preset JSON file (single preset or a list).
+    pub preset_file: Option<String>,
 }
 
 impl Default for Options {
@@ -37,6 +39,7 @@ impl Default for Options {
             yaw: 0.0,
             dist: 0.0,
             render: String::new(),
+            preset_file: None,
         }
     }
 }
@@ -50,6 +53,40 @@ pub fn all_presets(chan_file: Option<&str>) -> Result<Vec<Preset>> {
     Ok(v)
 }
 
+fn presets_for(opts: &Options) -> Result<Vec<Preset>> {
+    let mut v = all_presets(opts.chan_file.as_deref())?;
+    if let Some(f) = &opts.preset_file {
+        let src = std::fs::read_to_string(f)?;
+        let extra: Vec<Preset> = match serde_json::from_str::<Preset>(&src) {
+            Ok(p) => vec![p],
+            Err(_) => serde_json::from_str(&src)?,
+        };
+        // put them first so they are the default choice
+        let mut all = extra;
+        all.extend(v);
+        v = all;
+    }
+    Ok(v)
+}
+
+/// Blocking tracking readback + reproduction (the app does the same asynchronously).
+pub fn life_tick(g: &Gpu, world: &mut World) -> usize {
+    let mut enc = g.device.create_command_encoder(&Default::default());
+    let (buf, m, bytes) = world.sim.encode_track(&g.device, &mut enc);
+    let buf = buf.clone();
+    g.queue.submit([enc.finish()]);
+    let data = read_buffer_bytes(&g.device, &g.queue, &buf, 0, bytes);
+    let vals: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+    let f = world.n() / m;
+    let ops = world.life_update(&vals, m, f, world.sim.generation);
+    if !ops.is_empty() {
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        world.apply_ops(&g.device, &mut enc, &ops);
+        g.queue.submit([enc.finish()]);
+    }
+    ops.len()
+}
+
 fn find_preset(list: &[Preset], name: &str) -> Result<Preset> {
     let lname = name.to_lowercase();
     list.iter()
@@ -61,13 +98,26 @@ fn find_preset(list: &[Preset], name: &str) -> Result<Preset> {
 
 fn run_steps(g: &Gpu, world: &mut World, steps: u32) {
     let mut done = 0;
+    let mut births = 0;
     while done < steps {
         let k = (steps - done).min(16);
+        world.sim.update_flow(&g.device, &g.queue);
         let mut enc = g.device.create_command_encoder(&Default::default());
         world.sim.encode_steps(&mut enc, k);
         g.queue.submit([enc.finish()]);
         let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
         done += k;
+        if world.is_flow() {
+            births += life_tick(g, world);
+        }
+    }
+    if world.is_flow() {
+        let t = &world.tracker;
+        eprintln!(
+            "  creatures {}, reproductions {births}, languages {}",
+            t.creatures.len(),
+            crate::tracker::count_languages(&t.creatures)
+        );
     }
 }
 
@@ -83,7 +133,7 @@ pub fn mass(g: &Gpu, world: &World) -> Vec<f64> {
 
 pub fn screenshot(opts: &Options, out: &str) -> Result<()> {
     let g = Gpu::headless()?;
-    let presets = all_presets(opts.chan_file.as_deref())?;
+    let presets = presets_for(opts)?;
     let mut world = World::new(&g.device, opts.size, LeniaParams::default());
     let p = match &opts.preset {
         Some(name) => find_preset(&presets, name)?,
@@ -115,6 +165,10 @@ pub fn screenshot(opts: &Options, out: &str) -> Result<()> {
     cam.snap();
     let mut settings = RenderSettings { mode: opts.mode, ..Default::default() };
     settings.apply_overrides(&opts.render).map_err(|e| anyhow!(e))?;
+    if world.is_flow() {
+        life_tick(&g, &mut world);
+    }
+    renderer.set_creatures(&g.queue, &world.gpu_creatures(0.3, None));
     let mut enc = g.device.create_command_encoder(&Default::default());
     renderer.update_volume(&g.device, &g.queue, &mut enc, &world.sim, settings.smooth);
     renderer.render(&g.device, &g.queue, &mut enc, &view, (opts.width, opts.height), &cam, &settings, &Overlay::default(), 0.0);
@@ -165,7 +219,7 @@ pub fn save_png(path: &str, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
 pub fn bench(opts: &Options) -> Result<()> {
     let g = Gpu::headless()?;
     println!("Lenia3D benchmark on {} ({:?})", g.info.name, g.info.backend);
-    let presets = all_presets(opts.chan_file.as_deref())?;
+    let presets = presets_for(opts)?;
     let rules: Vec<(String, LeniaParams)> = match &opts.preset {
         Some(name) => {
             let p = find_preset(&presets, name)?;
@@ -207,7 +261,7 @@ pub fn bench(opts: &Options) -> Result<()> {
 /// report whether it stays alive and bounded.
 pub fn check_presets(opts: &Options) -> Result<()> {
     let g = Gpu::headless()?;
-    let presets = all_presets(opts.chan_file.as_deref())?;
+    let presets = presets_for(opts)?;
     let mut ok_count = 0;
     for p in &presets {
         let need = p.pattern().map(|q| q.dims.iter().copied().max().unwrap_or(0) as f32 + 16.0).unwrap_or(0.0).max(2.0 * p.rule.R + 8.0);

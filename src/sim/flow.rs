@@ -58,6 +58,8 @@ impl Default for FlowParams {
 pub struct EcologyParams {
     pub enabled: bool,
     pub eat: f32,
+    /// Cells thinner than this cannot eat (keeps diffuse dust from growing).
+    pub eat_min: f32,
     pub social: f32,
     pub meta_base: f32,
     pub meta_trait: f32,
@@ -80,6 +82,7 @@ impl Default for EcologyParams {
         Self {
             enabled: true,
             eat: 1.0,
+            eat_min: 0.3,
             social: 0.5,
             meta_base: 0.01,
             meta_trait: 0.01,
@@ -242,7 +245,7 @@ pub struct FlowUniform {
     mutation_size: f32,
     compat: f32,
     combat: f32,
-    _p: f32,
+    eat_min: f32,
 }
 
 #[repr(C)]
@@ -525,7 +528,7 @@ impl FlowState {
             mutation_size: e.mutation_size,
             compat: p.compat,
             combat: p.combat,
-            _p: 0.0,
+            eat_min: e.eat_min.clamp(0.0, 0.95),
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
     }

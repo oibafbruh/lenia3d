@@ -62,6 +62,13 @@ pub struct RenderSettings {
     pub smooth: bool,
     /// Internal resolution relative to the window (upscaled when < 1).
     pub render_scale: f32,
+    /// Flow mode: color creatures by their genome's hue.
+    pub genome_colors: bool,
+    /// Flow mode: green haze where food is (opacity, 0 = off).
+    pub food_haze: f32,
+    pub show_organs: bool,
+    /// Intensity of the sound-wave rings around calling creatures (0 = off).
+    pub sound_rings: f32,
 }
 
 /// sRGB 0-255 color to linear RGB.
@@ -108,6 +115,10 @@ impl Default for RenderSettings {
             bg_bottom: [0.012, 0.012, 0.018],
             smooth: true,
             render_scale: 1.0,
+            genome_colors: true,
+            food_haze: 0.15,
+            show_organs: true,
+            sound_rings: 1.0,
         }
     }
 }
@@ -185,7 +196,31 @@ struct Uniforms {
     ip: [u32; 4],
     screen: [f32; 4],
     p3: [f32; 4],
+    p4: [f32; 4],
+    ip2: [u32; 4],
 }
+
+/// One tracked creature as the renderer sees it (world units).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default, Debug)]
+pub struct GpuCreature {
+    pub center: [f32; 3],
+    pub radius: f32,
+    pub forward: [f32; 3],
+    pub eye: f32,
+    pub mouth: f32,
+    pub claw: f32,
+    pub ear: f32,
+    pub voice: f32,
+    pub hue: f32,
+    /// How loudly it is calling right now (0..1).
+    pub level: f32,
+    /// Eating activity (0..1), animates the mouth.
+    pub eat: f32,
+    pub selected: f32,
+}
+
+pub const MAX_GPU_CREATURES: usize = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -222,6 +257,8 @@ struct Targets {
 struct VolumeBinding {
     n: u32,
     nch: u32,
+    has_flow: bool,
+    _aux: wgpu::Texture,
     sim_id: u64,
     view: wgpu::TextureView,
     bricks: wgpu::Buffer,
@@ -246,6 +283,9 @@ pub struct Renderer {
     targets: Option<Targets>,
     volume: Option<VolumeBinding>,
     frame: u32,
+    creatures: wgpu::Buffer,
+    creature_count: u32,
+    dummy: wgpu::Buffer,
 }
 
 fn fullscreen_pipeline(
@@ -361,7 +401,29 @@ impl Renderer {
             targets: None,
             volume: None,
             frame: 0,
+            creatures: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("creatures"),
+                size: (MAX_GPU_CREATURES * std::mem::size_of::<GpuCreature>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            creature_count: 0,
+            dummy: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("render dummy"),
+                size: 64,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
         }
+    }
+
+    /// Upload the tracked creatures (for organs, sound rings and selection).
+    pub fn set_creatures(&mut self, queue: &wgpu::Queue, list: &[GpuCreature]) {
+        let k = list.len().min(MAX_GPU_CREATURES);
+        if k > 0 {
+            queue.write_buffer(&self.creatures, 0, bytemuck::cast_slice(&list[..k]));
+        }
+        self.creature_count = k as u32;
     }
 
     pub fn output_format(&self) -> wgpu::TextureFormat {
@@ -452,6 +514,23 @@ impl Renderer {
             return;
         }
         let n = sim.n;
+        let has_flow = sim.flow.is_some();
+        let aux_n = if has_flow { n } else { 1 };
+        let aux = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("aux volume"),
+            size: wgpu::Extent3d { width: aux_n, height: aux_n, depth_or_array_layers: aux_n },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let aux_view = aux.create_view(&Default::default());
+        let (genome, food, sense_a, sense_b) = match &sim.flow {
+            Some(f) => (&f.genome, &f.food, &f.sense, &f.sense_b),
+            None => (&self.dummy, &self.dummy, &self.dummy, &self.dummy),
+        };
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("volume"),
             size: wgpu::Extent3d { width: n, height: n, depth_or_array_layers: n },
@@ -473,7 +552,7 @@ impl Renderer {
         let ch = &sim.channels;
         let prep_params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
-            contents: bytemuck::cast_slice(&[n, ch.len() as u32, 1, 0]),
+            contents: bytemuck::cast_slice(&[n, ch.len() as u32, 1, has_flow as u32, (1.0 / (n as f32).powi(3)).to_bits(), 0, 0, 0]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let prep_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -486,6 +565,11 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: sim.wall.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&view) },
                 wgpu::BindGroupEntry { binding: 5, resource: prep_params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: genome.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: food.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: sense_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: sense_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&aux_view) },
             ],
         });
         let brick_params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -510,12 +594,16 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: bricks.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&aux_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: self.creatures.as_entire_binding() },
             ],
         });
         let _ = queue;
         self.volume = Some(VolumeBinding {
             n,
             nch: ch.len() as u32,
+            has_flow,
+            _aux: aux,
             sim_id: sim.layout_id(),
             view,
             bricks,
@@ -614,6 +702,20 @@ impl Renderer {
             ip: [settings.mode as u32, vol.n, vol.nch, flags],
             screen: [t.width as f32, t.height as f32, (self.frame % 64) as f32, pixel_angle],
             p3: [overlay.floor_offset[0], overlay.floor_offset[1], 0.0, 0.0],
+            p4: [settings.food_haze, 1.0, settings.sound_rings, 0.0],
+            ip2: [
+                self.creature_count,
+                if vol.has_flow {
+                    (settings.genome_colors as u32)
+                        | (((settings.food_haze > 0.0) as u32) << 1)
+                        | ((settings.show_organs as u32) << 2)
+                        | (((settings.sound_rings > 0.0) as u32) << 3)
+                } else {
+                    (settings.show_organs as u32) << 2 | (((settings.sound_rings > 0.0) as u32) << 3)
+                },
+                0,
+                0,
+            ],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         queue.write_buffer(

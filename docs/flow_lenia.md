@@ -61,6 +61,7 @@ Kernels `k ≥ 6` use the rule's global `h_k`.
   | Parameter | Meaning |
   |---|---|
   | `eat` | eating rate |
+  | `eat_min` | minimum density needed to eat (default 0.3) |
   | `social` | eating boost from local sound |
   | `meta_base` | base metabolism |
   | `meta_trait` | metabolic cost of each organ |
@@ -173,7 +174,8 @@ This step is pointwise and runs only if ecology is enabled. It uses `A'`, `g'`, 
 **Eating:**
 
 ```
-eat = min(Φ, eat · mouth · Φ · min(A'_Σ, 1) · (1 + social · H/(H + 0.1)) · dt)
+sat = clamp((A'_Σ − eat_min) / (1 − eat_min), 0, 1)    (thin dust cannot eat)
+eat = min(Φ, eat · mouth · Φ · sat · (1 + social · H/(H + 0.1)) · dt)
 Φ  -= eat
 A'_c += eat · A'_c / A'_Σ        (or into channel 0 if A'_Σ = 0)
 ```

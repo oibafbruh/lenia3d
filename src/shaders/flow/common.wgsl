@@ -24,7 +24,7 @@ struct FlowParams {
     mutation_size: f32,
     compat: f32,  // genetic distance above which contact means combat
     combat: f32,  // fraction of foreign matter destroyed per unit time by claws
-    _p2: f32,
+    eat_min: f32, // cells thinner than this cannot eat (stops diffuse dust from growing)
 };
 
 // Genome: 16 floats per cell stored as 4 x vec4.

@@ -81,6 +81,9 @@ pub struct SoupInit {
     pub blob_radius: f32,
     #[serde(default = "half")]
     pub density: f32,
+    /// Flow mode: organ gene ranges of the founders.
+    #[serde(default)]
+    pub traits: Option<super::flow::TraitRanges>,
 }
 
 fn one() -> f32 {
@@ -105,6 +108,11 @@ pub struct Preset {
     pub world_size: Option<u32>,
     #[serde(default)]
     pub kind: String,
+    /// Present for Flow-mode presets (ecosystems).
+    #[serde(default)]
+    pub flow: Option<super::flow::FlowParams>,
+    #[serde(default)]
+    pub ecology: Option<super::flow::EcologyParams>,
 }
 
 impl Preset {
@@ -148,7 +156,13 @@ impl Preset {
             init: None,
             world_size: None,
             kind: "creature".into(),
+            flow: None,
+            ecology: None,
         }
+    }
+
+    pub fn is_flow(&self) -> bool {
+        self.flow.is_some()
     }
 }
 
@@ -222,9 +236,11 @@ pub fn fallback_preset() -> Preset {
         description: "Random blobs under a classic single-kernel rule.".into(),
         rule: super::params::LeniaParams::default(),
         cells: None,
-        init: Some(SoupInit { blobs: 12, blob_radius: 1.0, density: 0.5 }),
+        init: Some(SoupInit { blobs: 12, blob_radius: 1.0, density: 0.5, traits: None }),
         world_size: None,
         kind: "soup".into(),
+        flow: None,
+        ecology: None,
     }
 }
 

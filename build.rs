@@ -3,11 +3,16 @@ use std::{env, fs, path::Path};
 
 fn main() {
     println!("cargo:rerun-if-changed=presets");
-    let dir = Path::new("presets");
-    let mut files: Vec<_> = fs::read_dir(dir)
-        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect())
-        .unwrap_or_default();
-    files.sort();
+    println!("cargo:rerun-if-changed=presets/flow");
+    let list = |dir: &Path| -> Vec<std::path::PathBuf> {
+        let mut v: Vec<_> = fs::read_dir(dir)
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect())
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
+    let mut files = list(Path::new("presets"));
+    files.extend(list(Path::new("presets/flow")));
     let mut code = String::from("pub static BUILTIN_PRESETS: &[(&str, &str)] = &[\n");
     for f in &files {
         println!("cargo:rerun-if-changed={}", f.display());

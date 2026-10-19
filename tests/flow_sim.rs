@@ -181,7 +181,7 @@ fn ecology_conserves_matter_with_full_recycling() {
     let Some(g) = gpu() else { return };
     let n = 32u32;
     let a = blob_world(32, 5);
-    let eco = EcologyParams { enabled: true, recycle: 1.0, regrow: 0.0, eat: 2.0, meta_base: 0.05, mutation_rate: 0.0, ..Default::default() };
+    let eco = EcologyParams { enabled: true, recycle: 1.0, regrow: 0.0, eat: 2.0, eat_min: 0.0, meta_base: 0.05, mutation_rate: 0.0, ..Default::default() };
     let fert = eco.fertility as f64;
     let mut sim = setup(&g, n, eco, &a);
     let m0: f64 = a.iter().map(|&v| v as f64).sum::<f64>() + fert * (n as f64).powi(3);

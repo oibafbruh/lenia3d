@@ -15,6 +15,7 @@ fn usage() -> ! {
          --resolution WxH        image size for --screenshot\n\
          --scale F               creature scale factor\n\
          --chan-file FILE        Bert Chan's animals3D.json to include\n\
+         --preset-file FILE      extra preset JSON (one preset or a list)\n\
          --check                 verify every preset stays alive (add --chan-file for Chan's)\n\
          --list-presets          print built-in presets"
     );
@@ -44,6 +45,7 @@ fn main() {
             "--preset" => opts.preset = Some(next(&mut i)),
             "--scale" => opts.scale = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--render" => opts.render = next(&mut i),
+            "--preset-file" => opts.preset_file = Some(next(&mut i)),
             "--dist" => opts.dist = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--yaw" => opts.yaw = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--chan-file" => opts.chan_file = Some(next(&mut i)),

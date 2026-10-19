@@ -491,7 +491,7 @@ impl State {
                         // periodic sheet/rod: exact world size, no scaling
                         self.ui.scale = 1.0;
                         if self.world.n() != w && w <= self.max_n {
-                            self.world.resize(device, w);
+                            self.world.resize(device, queue, w);
                         }
                     }
                     // creatures need room: grow the world if it is too small for the pattern
@@ -502,7 +502,7 @@ impl State {
                         while (n as f32) < need && n < self.max_n {
                             n *= 2;
                         }
-                        self.world.resize(device, n);
+                        self.world.resize(device, queue, n);
                     }
                     self.world.load_preset(device, queue, &p, self.ui.scale);
                     self.ui.rule = self.world.sim.params().clone();
@@ -525,13 +525,13 @@ impl State {
                 self.ui.follow = false;
                 let mut enc = device.create_command_encoder(&Default::default());
                 self.world.sim.clear(&mut enc, false);
-                let init = crate::sim::preset::SoupInit { blobs: 10, blob_radius: 1.0, density: 0.5 };
+                let init = crate::sim::preset::SoupInit { blobs: 10, blob_radius: 1.0, density: 0.5, traits: None };
                 self.world.seed_soup(device, &mut enc, &init);
                 queue.submit([enc.finish()]);
                 self.ui.running = true;
             }
             Action::Resize(n) => {
-                self.world.resize(device, n);
+                self.world.resize(device, queue, n);
                 self.world.reset(device, queue);
                 self.ui.rule = self.world.sim.params().clone();
                 self.ui.set_status(format!("World is now {n}³"), now);

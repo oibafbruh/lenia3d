@@ -12,7 +12,7 @@ State (a plain dict)::
     fert (N, N, N) float32      Psi in [-1, 1]
     wall (N, N, N) float32      W in {0, 1}
 
-Genome layout: 0..7 h_k, 8 eye, 9 ear, 10 voice, 11 mouth, 12 claw, 13 pitch,
+Genome layout: 0..5 h_k, 6 tune, 7 alarm, 8 eye, 9 ear, 10 voice, 11 mouth, 12 claw, 13 pitch,
 14 hue, 15 timbre.
 
 Main entry points
@@ -33,7 +33,21 @@ Choices where the spec leaves freedom (keep the GPU aligned):
   Hue wraps (mod 1) instead of clamping, for the bud mutation too.
 * Tracker effective radius uses ``cells = blocks * f^3`` (fine cells).
 * Tracker matching: greedy nearest pairs (periodic distance), a pair is only accepted if
-  its distance is ``<= max(4, r_prev + r_cur)``.
+  its distance is ``<= max(4, r_prev + r_cur)``.  ``run_world`` tracks every 10 steps and
+  checks the budding conditions at those times.
+* Inheritance sampling: walk the 27 offsets in OFFSETS order (z-major, each -1..1), pick
+  the first one whose running weight sum exceeds ``u * total`` (u uniform [0, 1)).
+* Per-cell mutation is gated on A'_Sigma before eating/metabolism.
+* Spec revision (tune/alarm genes, hearing H, compatibility gate, languages):
+  - resident test and resident genome use the state *before* the step;
+  - the gate is never applied to offset (0, 0, 0) (dist = 0 anyway);
+  - m(y) used for inheritance is the mass that actually lands (after the kill);
+  - kill uses the resident's claw(x); destroyed mass goes to food at x (even with the
+    ecology disabled, the food field still exists);
+  - T_prev (state["T_prev"]) = Kfar*(claw A_Sigma) of the previous step, 0 at start;
+  - metabolism organ sum stays eye+|ear|+voice+mouth+claw (alarm/tune are free).
+* ``eco["eat_min"]`` (proposed, now in the spec): sat = clamp((A_Sigma - eat_min) /
+  (1 - eat_min), 0, 1) replaces min(A_Sigma, 1); eat_min = 0 is the original formula.
 """
 from __future__ import annotations
 
@@ -50,14 +64,21 @@ import lenia_ref as L  # noqa: E402
 from lenia_ref import _rfftn, _irfftn, _wrapped_offsets, growth, make_kernel, normalize_rule  # noqa: E402
 
 NGENES = 16
+NH = 6  # genes 0..5 are kernel weights h_0..h_5; kernels >= 6 use the rule's global h
+TUNE, ALARM = 6, 7
 EYE, EAR, VOICE, MOUTH, CLAW, PITCH, HUE, TIMBRE = 8, 9, 10, 11, 12, 13, 14, 15
 TRAITS = {"eye": EYE, "ear": EAR, "voice": VOICE, "mouth": MOUTH, "claw": CLAW}
+# traits that can be seeded from init.traits ranges (tune is set from the language)
+SEED_TRAITS = {"eye": EYE, "ear": EAR, "voice": VOICE, "mouth": MOUTH, "claw": CLAW, "alarm": ALARM}
+TRACK_TRAITS = dict(SEED_TRAITS, tune=TUNE, pitch=PITCH)
+# compatibility distance: sum_{k<4} |dh_k| + 3 |dpitch| + 0.5 |dtimbre|
+COMPAT_GENES = [(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0), (PITCH, 3.0), (TIMBRE, 0.5)]
 GENE_LO = np.zeros(NGENES, np.float32)
 GENE_LO[EAR] = -1.0
 GENE_HI = np.ones(NGENES, np.float32)
 
 FLOW_DEFAULTS = {"theta": 2.0, "n": 2.0, "s": 0.65, "far": 2.5, "w_eye": 1.0, "w_ear": 1.0,
-                 "claw_bias": 4.0}
+                 "claw_bias": 4.0, "compat": 0.6, "combat": 1.0}
 ECO_DEFAULTS = {"enabled": False, "eat": 1.0, "social": 0.5, "meta_base": 0.01, "meta_trait": 0.01,
                 "toxicity": 2.0, "recycle": 0.5, "regrow": 0.05, "fertility": 0.3,
                 "mutation_rate": 0.0, "mutation_size": 0.05, "bud_mass": 150.0, "bud_age": 300,
@@ -150,37 +171,66 @@ class FlowSim:
         for k_i, (k, kf) in enumerate(zip(self.kernels, self.kfft)):
             U = _irfftn(Fa[k["src"]] * kf, self.shape).astype(np.float32, copy=False)
             g = growth(k["gn"], U, k["m"], k["s"])
-            if k_i < 8 and G is not None:
+            if k_i < NH and G is not None:
                 Aff[k["dst"]] += G[k_i] * g
             else:
                 Aff[k["dst"]] += np.float32(k["h"]) * g
         return Aff
 
-    def displacement(self, A, G, food=None, wall=None, need_ss=False):
-        """Returns (D (C,3,N,N,N), Ss or None)."""
+    def senses(self, A, G, food=None, T_prev=None, need_food=False, need_hear=False):
+        """Sense fields (spec "Senses", revised):
+
+        call    = min(voice + alarm * min(8 T_prev, 1) * (1 - claw), 1.5)
+        E       = call * A_Sigma;  E_lo = E (1 - pitch);  E_hi = E pitch
+        sense_a = (Kfar*food, Kfar*E_lo);  sense_b = (Kfar*E_hi, Kfar*(claw A_Sigma))
+        H       = (1 - tune) sense_a.y + tune sense_b.x
+
+        Returns dict with Sf (or None), H (or None), T (= sense_b.y, or None).
+        """
+        AS = A.sum(axis=0)
+        out = {"Sf": None, "H": None, "T": None}
+        if need_food and food is not None:
+            out["Sf"] = self.conv_far(food)
+        if G is None:
+            return out
+        if bool(np.any(G[ALARM] != 0)) or bool(np.any(G[CLAW] != 0)):
+            out["T"] = self.conv_far(G[CLAW] * AS)
+        if need_hear:
+            call = G[VOICE]
+            if T_prev is not None and bool(np.any(G[ALARM] != 0)):
+                call = call + G[ALARM] * np.minimum(np.float32(8.0) * T_prev, 1.0) * (np.float32(1.0) - G[CLAW])
+            call = np.minimum(call, np.float32(1.5))
+            E = call * AS
+            lo = self.conv_far(E * (np.float32(1.0) - G[PITCH]))
+            hi = self.conv_far(E * G[PITCH])
+            out["H"] = (np.float32(1.0) - G[TUNE]) * lo + G[TUNE] * hi
+        return out
+
+    def displacement(self, A, G, food=None, wall=None, need_hear=False, T_prev=None):
+        """Returns (D (C,3,N,N,N), senses dict)."""
         fl = self.flow
         AS = A.sum(axis=0)
         Aff = self.affinity(A, G)
         alpha = np.clip((AS / np.float32(fl["theta"])) ** np.float32(fl["n"]), 0.0, 1.0).astype(np.float32)
         gA = grad(AS)
         steer = None
-        Ss = None
+        sen = {"Sf": None, "H": None, "T": None}
         if G is not None:
             eye, ear = G[EYE], G[EAR]
             use_eye = fl["w_eye"] != 0.0 and food is not None and bool(np.any(eye != 0))
             use_ear = fl["w_ear"] != 0.0 and bool(np.any(ear != 0))
-            if use_ear or need_ss:
-                Ss = self.conv_far(G[VOICE] * AS)
+            sen = self.senses(A, G, food, T_prev, need_food=use_eye, need_hear=use_ear or need_hear)
             if use_eye or use_ear:
                 steer = [np.zeros(self.shape, np.float32) for _ in range(3)]
                 if use_eye:
-                    Sf = self.conv_far(food)
+                    Sf = sen["Sf"]
                     v = clip1([g / (Sf + np.float32(0.05)) for g in grad(Sf)])
                     w = np.float32(fl["w_eye"]) * eye
                     for i in range(3):
                         steer[i] += w * v[i]
                 if use_ear:
-                    v = clip1([g / (Ss + np.float32(0.05)) for g in grad(Ss)])
+                    H = sen["H"]
+                    v = clip1([g / (H + np.float32(0.05)) for g in grad(H)])
                     w = np.float32(fl["w_ear"]) * ear
                     for i in range(3):
                         steer[i] += w * v[i]
@@ -202,7 +252,7 @@ class FlowSim:
                 for c in range(self.C):
                     d = D[c, i]
                     d[((d > 0) & wp) | ((d < 0) & wm)] = 0.0
-        return D, Ss
+        return D, sen
 
     def reintegrate(self, A, D, want_weights=False):
         """Mass gather.  Returns (A', m_o list of 27 (N,N,N) or None)."""
@@ -236,8 +286,52 @@ class FlowSim:
                 mo.append(np.roll(src * inv, (-oz, -oy, -ox), axis=(0, 1, 2)))
         return Anew, mo
 
-    def inherit(self, G, mo, rng):
-        """Stochastic genome inheritance: P(y) ~ m(y)(1 + claw_bias*claw(y)).
+    def reintegrate_gated(self, A, D, G):
+        """Reintegration with the compatibility gate (spec revision).
+
+        Resident genome g(x) applies where sum_c A_c(x) > 0.02 (old state).  A source y is
+        foreign if dist(g(y), g(x)) > compat.  Foreign contributions are scaled by
+        (1 - kill), kill = clamp(combat * claw(x) * dt, 0, 1); the destroyed mass is
+        returned (to be added to food at x).  Returns (A', m_o list (post-kill),
+        foreign_o list (bool), destroyed (N,N,N)).
+        """
+        s = self.flow["s"]
+        inv = np.float32(1.0 / (2.0 * s) ** 3)
+        resident = A.sum(axis=0) > 0.02
+        kill = np.clip(np.float32(self.flow["combat"]) * G[CLAW] * self.dt, 0.0, 1.0).astype(np.float32)
+        keep = np.float32(1.0) - kill
+        compat = np.float32(self.flow["compat"])
+        ov = []
+        for c in range(self.C):
+            ov.append([[_overlap(np.float32(o) + D[c, i], s) for o in (-1, 0, 1)] for i in range(3)])
+        Anew = np.zeros_like(A)
+        destroyed = np.zeros(self.shape, np.float32)
+        mo, fo = [], []
+        gsel = [(G[j], np.float32(wj)) for j, wj in COMPAT_GENES]
+        for (oz, oy, ox) in OFFSETS:
+            sh = (-oz, -oy, -ox)
+            contrib = [np.roll(A[c] * ov[c][0][oz + 1] * ov[c][1][oy + 1] * ov[c][2][ox + 1] * inv, sh, axis=(0, 1, 2))
+                       for c in range(self.C)]
+            if (oz, oy, ox) == (0, 0, 0):
+                foreign = np.zeros(self.shape, bool)
+            else:
+                dist = np.zeros(self.shape, np.float32)
+                for g, wj in gsel:
+                    dist += wj * np.abs(np.roll(g, sh, axis=(0, 1, 2)) - g)
+                foreign = resident & (dist > compat)
+            scale = np.where(foreign, keep, np.float32(1.0))
+            m = np.zeros(self.shape, np.float32)
+            for c in range(self.C):
+                kept = contrib[c] * scale
+                Anew[c] += kept
+                destroyed += contrib[c] - kept
+                m += kept
+            mo.append(m)
+            fo.append(foreign)
+        return Anew, mo, fo, destroyed
+
+    def inherit(self, G, mo, rng, foreign=None):
+        """Stochastic genome inheritance: P(y) ~ m(y)(1 + claw_bias*claw(y)*foreign(y)).
 
         Neighbour ``i`` (in OFFSETS order) is chosen where the running sum of the
         weights first exceeds ``u * total`` (u uniform in [0,1) per cell)."""
@@ -247,8 +341,10 @@ class FlowSim:
         W = []
         tot = np.zeros(self.shape, np.float32)
         for i, (oz, oy, ox) in enumerate(OFFSETS):
-            claw_src = np.roll(G[CLAW], (-oz, -oy, -ox), axis=(0, 1, 2))
-            w = np.maximum(mo[i], 0.0) * (one + cb * claw_src)
+            w = np.maximum(mo[i], 0.0)
+            if foreign is not None and (oz, oy, ox) != (0, 0, 0):
+                claw_src = np.roll(G[CLAW], (-oz, -oy, -ox), axis=(0, 1, 2))
+                w = w * (one + cb * claw_src * foreign[i])
             W.append(w)
             tot += w
         target = rng.random(self.shape, dtype=np.float32) * tot
@@ -273,30 +369,44 @@ class FlowSim:
         A, G = state["A"], state["G"]
         food, fert, wall = state.get("food"), state.get("fert"), state.get("wall")
         eco_on = eco is not None and eco.get("enabled", False)
-        need_ss = eco_on and float(eco["social"]) != 0.0
-        D, Ss = self.displacement(A, G, food, wall, need_ss=need_ss)
-        Anew, mo = self.reintegrate(A, D, want_weights=inherit)
-        if inherit:
-            Gn = self.inherit(G, mo, rng)
+        need_hear = eco_on and float(eco["social"]) != 0.0
+        D, sen = self.displacement(A, G, food, wall, need_hear=need_hear, T_prev=state.get("T_prev"))
+        if sen["T"] is not None:
+            state["T_prev"] = sen["T"]
+        gated = inherit and G is not None and _genes_vary(G)
+        if gated:
+            Anew, mo, fo, destroyed = self.reintegrate_gated(A, D, G)
+            if food is not None:
+                food += destroyed
+            Gn = self.inherit(G, mo, rng, fo)
         else:
+            Anew, _ = self.reintegrate(A, D)
             Gn = G
         if wall is not None:
             Anew[:, wall > 0.5] = 0.0
         if eco_on:
-            self.ecology(Anew, Gn, food, fert, Ss, eco, rng)
+            self.ecology(Anew, Gn, food, fert, sen["H"], eco, rng)
             if wall is not None:
                 food[wall > 0.5] = 0.0
         state["A"], state["G"] = Anew, Gn
         state["step"] = state.get("step", 0) + 1
         return state
 
-    def ecology(self, A, G, food, fert, Ss, eco, rng):
+    def ecology(self, A, G, food, fert, H, eco, rng):
         dt = self.dt
         AS = A.sum(axis=0)
         boost = np.float32(1.0)
-        if Ss is not None:
-            boost = np.float32(1.0) + np.float32(eco["social"]) * Ss / (Ss + np.float32(0.1))
-        eat = np.minimum(food, np.float32(eco["eat"]) * G[MOUTH] * food * np.minimum(AS, 1.0) * boost * dt)
+        if H is not None:
+            boost = np.float32(1.0) + np.float32(eco["social"]) * H / (H + np.float32(0.1))
+        # sat = min(A'_Sigma, 1) in the spec.  PROPOSED extension (eco["eat_min"], default 0
+        # = spec): sat = clamp((A'_Sigma - eat_min) / (1 - eat_min), 0, 1), so thin "dust"
+        # cannot eat (see presets/flow/README.md).
+        em = float(eco.get("eat_min", 0.0))
+        if em > 0.0:
+            sat = np.clip((AS - np.float32(em)) / np.float32(1.0 - em), 0.0, 1.0)
+        else:
+            sat = np.minimum(AS, 1.0)
+        eat = np.minimum(food, np.float32(eco["eat"]) * G[MOUTH] * food * sat * boost * dt)
         food -= eat
         pos = AS > 0
         frac = np.where(pos, eat / np.where(pos, AS, 1.0), 0.0).astype(np.float32)
@@ -328,6 +438,14 @@ class FlowSim:
                 vals[hue] = np.mod(vals[hue], 1.0)
                 vals[~hue] = np.clip(vals[~hue], GENE_LO[j[~hue]], GENE_HI[j[~hue]])
                 G[(j,) + idx] = vals
+
+
+def _genes_vary(G) -> bool:
+    """True unless the genome is spatially uniform (then inheritance/gating are no-ops)."""
+    if G.strides[1:] == (0, 0, 0):
+        return False
+    flat = G.reshape(NGENES, -1)
+    return bool(np.any(flat != flat[:, :1]))
 
 
 _SIM_CACHE: dict = {}
@@ -373,7 +491,7 @@ def mass_only_step(A: np.ndarray, rule: dict, flow: dict | None, genome=None, wa
 def default_genome(rule: dict, traits: dict | None = None) -> np.ndarray:
     rule = normalize_rule(rule)
     g = np.zeros(NGENES, np.float32)
-    for i, k in enumerate(rule["kernels"][:8]):
+    for i, k in enumerate(rule["kernels"][:NH]):
         g[i] = k["h"]
     for name, v in (traits or {}).items():
         g[TRAITS[name]] = v
@@ -387,9 +505,16 @@ def default_genome(rule: dict, traits: dict | None = None) -> np.ndarray:
 def seed_flow(rule: dict, N: int, init: dict, eco: dict | None = None, seed=None) -> dict:
     """Flow preset seeding: lenia_ref.seed_blobs distribution, per-blob random genome.
 
-    genes h_k = rule h_k exactly; traits uniform in init["traits"] ranges (missing -> 0);
-    pitch/hue/timbre uniform [0,1].  The genome is written where that blob's v > 0
-    (later blobs overwrite).  Food = fertility = eco.fertility everywhere.
+    genes h_k = rule h_k exactly (k < 6); traits (eye, ear, voice, mouth, claw, alarm)
+    uniform in init["traits"] ranges (missing -> 0).  Languages
+    (init["traits"]["languages"], default 3): each founder picks L uniformly in
+    0..languages-1; pitch = (L + 0.5)/languages + U(-0.02, 0.02); tune = pitch;
+    hue = (L + 0.5)/languages + U(-0.05, 0.05) (mod 1); timbre uniform [0,1].
+    The genome is written where that blob's v > 0 AND v >= the cell's previous value,
+    i.e. where this blob sets the max (deviation from "v > 0, later blobs overwrite":
+    with overlapping founders that rule mixes genomes cell by cell, and the compatibility
+    gate then destroys most of the mass in the overlap).
+    Food = fertility = eco.fertility everywhere.
     """
     rule = normalize_rule(rule)
     rng = np.random.default_rng(seed)
@@ -407,21 +532,29 @@ def seed_flow(rule: dict, N: int, init: dict, eco: dict | None = None, seed=None
         t = 1.0 - d[inside] / rb
         w = t * t * (3.0 - 2.0 * t)
         g = default_genome(rule)
-        for name, gi in TRAITS.items():
+        for name, gi in SEED_TRAITS.items():
             lo, hi = traits.get(name, [0.0, 0.0])
             g[gi] = rng.uniform(lo, hi)
-        g[PITCH], g[HUE], g[TIMBRE] = rng.random(3)
+        nl = max(1, int(traits.get("languages", 3)))
+        lang = int(rng.integers(nl))
+        g[PITCH] = np.clip((lang + 0.5) / nl + rng.uniform(-0.02, 0.02), 0.0, 1.0)
+        g[TUNE] = g[PITCH]
+        g[HUE] = ((lang + 0.5) / nl + rng.uniform(-0.05, 0.05)) % 1.0
+        g[TIMBRE] = rng.random()
         anyv = np.zeros(w.shape, bool)
         for ch in range(C):
-            v = rng.random(w.shape) * w
+            v = (rng.random(w.shape) * w).astype(np.float32)
             v = v * (rng.random(w.shape) < density)
-            A[ch][inside] = np.maximum(A[ch][inside], v.astype(np.float32))
-            anyv |= v > 0
+            old = A[ch][inside]
+            # genome follows the blob that sets the cell's value (v > 0 and v >= old value)
+            anyv |= (v > 0) & (v >= old)
+            A[ch][inside] = np.maximum(old, v)
         idx = tuple(a[anyv] for a in np.nonzero(inside))
         G[(slice(None),) + idx] = g[:, None]
     fertv = float((eco or {}).get("fertility", ECO_DEFAULTS["fertility"]))
     fert = np.full(shape, fertv, np.float32)
-    return {"A": A, "G": G, "food": fert.copy(), "fert": fert, "wall": np.zeros(shape, np.float32), "step": 0}
+    return {"A": A, "G": G, "food": fert.copy(), "fert": fert, "wall": np.zeros(shape, np.float32), "step": 0,
+            "T_prev": np.zeros(shape, np.float32)}
 
 
 # --------------------------------------------------------------------------
@@ -453,7 +586,7 @@ class Tracker:
         def bsum(x):
             return x.reshape(cn, f, cn, f, cn, f).sum(axis=(1, 3, 5))
         BM = bsum(M).astype(np.float64)
-        BT = {name: bsum(M * G[gi]).astype(np.float64) for name, gi in TRAITS.items()} if G is not None else {}
+        BT = {name: bsum(M * G[gi]).astype(np.float64) for name, gi in TRACK_TRAITS.items()} if G is not None else {}
         return BM, BT
 
     def components(self, A, G=None):
@@ -611,7 +744,7 @@ def run_world(rule, flow, eco, state, steps, seed=0, track_every=10, inherit=Non
             if comps:
                 tot = sum(c["mass"] for c in comps)
                 rec["traits"] = {k: sum(c["traits"].get(k, 0) * c["mass"] for c in comps) / max(tot, 1e-9)
-                                 for k in TRAITS}
+                                 for k in TRACK_TRAITS}
             budded = 0
             if eco_on and budding:
                 for c in comps:

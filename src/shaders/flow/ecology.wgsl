@@ -45,7 +45,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3
         let msum = m.x + m.y + m.z;
         // eating
         let ss = max(hearing(sense_a[i].y, sense_b[i].x, g[1].z) * fp.scale, 0.0);
-        let eat = min(f, fp.eat * mouth * f * min(msum, 1.0) * (1.0 + fp.social * ss / (ss + 0.1)) * dt);
+        let sat = clamp((msum - fp.eat_min) / max(1.0 - fp.eat_min, 1e-3), 0.0, 1.0);
+        let eat = min(f, fp.eat * mouth * f * sat * (1.0 + fp.social * ss / (ss + 0.1)) * dt);
         f -= eat;
         if (msum > 1e-9) {
             m += eat * m / msum;

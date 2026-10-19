@@ -12,7 +12,8 @@ eco    : run a preset JSON (ecology ON, budding) for ``--steps`` steps and print
 Examples::
 
     python3 tools/flow_search.py search --minutes 25 --workers 3 --out flow_search.jsonl
-    python3 tools/flow_search.py eco presets/flow/balanced.json --steps 2500 --seed 1
+    python3 tools/flow_search.py eco presets/flow/grazing_drift.json --steps 2000 --seeds 1 2
+    python3 tools/flow_search.py eco presets/flow/primordial_flow.json --steps 1500 --seeds 4
 """
 from __future__ import annotations
 

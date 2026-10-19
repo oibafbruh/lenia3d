@@ -18,6 +18,28 @@ struct Uniforms {
     ip: vec4<u32>,          // mode, n, channels, flags
     screen: vec4<f32>,      // width, height, frame, pixel angle
     p3: vec4<f32>,          // floor grid offset x, z (follow mode scrolling)
+    p4: vec4<f32>,          // food haze opacity, organ scale, sound rings, -
+    ip2: vec4<u32>,         // creature count, flags2, -, -
+};
+
+const F2_GENOME: u32 = 1u;
+const F2_FOOD: u32 = 2u;
+const F2_ORGANS: u32 = 4u;
+const F2_SOUND: u32 = 8u;
+
+struct Creature {
+    center: vec3<f32>,
+    radius: f32,
+    forward: vec3<f32>,
+    eye: f32,
+    mouth: f32,
+    claw: f32,
+    ear: f32,
+    voice: f32,
+    hue: f32,
+    level: f32,
+    eat: f32,
+    selected: f32,
 };
 
 const FLAG_FLOOR: u32 = 1u;
@@ -32,6 +54,25 @@ const BRICK: u32 = 8u;
 @group(0) @binding(1) var vol: texture_3d<f32>;
 @group(0) @binding(2) var samp: sampler;
 @group(0) @binding(3) var<storage, read> bricks: array<vec2<f32>>;
+@group(0) @binding(4) var aux: texture_3d<f32>;
+@group(0) @binding(5) var<storage, read> creatures: array<Creature>;
+
+fn has2(flag: u32) -> bool {
+    return (u.ip2.y & flag) != 0u;
+}
+
+// HSV (display space) to linear RGB.
+fn hsv(h: f32, s: f32, v: f32) -> vec3<f32> {
+    let k = vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0);
+    let q = abs(fract(vec3<f32>(h) + k) * 6.0 - 3.0);
+    let c = v * mix(vec3<f32>(1.0), clamp(q - 1.0, vec3<f32>(0.0), vec3<f32>(1.0)), s);
+    return pow(c, vec3<f32>(2.2));
+}
+
+fn genome_hue(p: vec3<f32>) -> f32 {
+    let a = textureSampleLevel(aux, samp, p * 0.5 + 0.5, 0.0);
+    return atan2(a.z, a.y) / 6.2831853;
+}
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -365,6 +406,9 @@ fn march_organic(ro: vec3<f32>, rd: vec3<f32>, t0: f32, t1: f32, jitter: f32, en
             let n = surface_normal(ph, rd, false);
             let sc = sample_vol(ph - n * vx);
             var base = channel_color(sc);
+            if (has2(F2_GENOME)) {
+                base = hsv(genome_hue(ph - n * vx), 0.6, 0.9);
+            }
             if (has(FLAG_COLORMAP)) {
                 base = palette(0.15 + 0.85 * density_at(ph - n * vx * 3.0));
             }
@@ -392,6 +436,9 @@ fn march_organic(ro: vec3<f32>, rd: vec3<f32>, t0: f32, t1: f32, jitter: f32, en
                 if (u.ip.z > 1u) {
                     base = channel_color(sample_vol(ph)) * 1.15;
                 }
+                if (has2(F2_GENOME)) {
+                    base = hsv(genome_hue(ph) + 0.06, 0.8, 1.0);
+                }
                 if (has(FLAG_COLORMAP)) {
                     base = palette(0.55 + 0.45 * density_at(ph - n * vx * 2.0));
                 }
@@ -406,7 +453,13 @@ fn march_organic(ro: vec3<f32>, rd: vec3<f32>, t0: f32, t1: f32, jitter: f32, en
             if (u.ip.z > 1u) {
                 core_tint = channel_color(s) * 1.15;
             }
-            var glow = mix(channel_color(s), core_tint, smoothstep(iso, core, d));
+            var skin = channel_color(s);
+            if (has2(F2_GENOME)) {
+                let hue = genome_hue(p);
+                skin = hsv(hue, 0.6, 0.9);
+                core_tint = hsv(hue + 0.06, 0.8, 1.0);
+            }
+            var glow = mix(skin, core_tint, smoothstep(iso, core, d));
             if (has(FLAG_COLORMAP)) {
                 glow = palette(d);
             }
@@ -460,6 +513,9 @@ fn march_glow(ro: vec3<f32>, rd: vec3<f32>, t0: f32, t1: f32, jitter: f32, mip: 
                 maxd = max(maxd, d);
             } else {
                 var e = u.col0.rgb * s.x * s.x + u.col1.rgb * s.y * s.y + u.col2.rgb * s.z * s.z;
+                if (has2(F2_GENOME)) {
+                    e = hsv(genome_hue(p), 0.7, 1.0) * d * d;
+                }
                 if (has(FLAG_COLORMAP)) {
                     e = palette(d) * d;
                 }
@@ -588,6 +644,274 @@ fn overlays(col: vec3<f32>, ro: vec3<f32>, rd: vec3<f32>, t_hit: f32) -> vec3<f3
     return c;
 }
 
+
+// ---------------------------------------------------------------- organs
+
+fn dot2(v: vec3<f32>) -> f32 {
+    return dot(v, v);
+}
+
+fn sd_ellipsoid(p: vec3<f32>, r: vec3<f32>) -> f32 {
+    let k0 = length(p / r);
+    let k1 = length(p / (r * r));
+    return k0 * (k0 - 1.0) / max(k1, 1e-6);
+}
+
+// Round cone from a (radius r1) to b (radius r2), after Inigo Quilez.
+fn sd_round_cone(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r1: f32, r2: f32) -> f32 {
+    let ba = b - a;
+    let l2 = dot(ba, ba);
+    let rr = r1 - r2;
+    let a2 = l2 - rr * rr;
+    let il2 = 1.0 / l2;
+    let pa = p - a;
+    let y = dot(pa, ba);
+    let z = y - l2;
+    let x2 = dot2(pa * l2 - ba * y);
+    let y2 = y * y * l2;
+    let z2 = z * z * l2;
+    let k = sign(rr) * rr * rr * x2;
+    if (sign(z) * a2 * z2 > k) {
+        return sqrt(x2 + z2) * il2 - r2;
+    }
+    if (sign(y) * a2 * y2 < k) {
+        return sqrt(x2 + y2) * il2 - r1;
+    }
+    return (sqrt(x2 * a2 * il2) + y * rr) * il2 - r1;
+}
+
+struct Frame {
+    f: vec3<f32>,
+    up: vec3<f32>,
+    rt: vec3<f32>,
+};
+
+fn creature_frame(c: Creature) -> Frame {
+    var fr: Frame;
+    var f = c.forward;
+    if (length(f) < 1e-4) {
+        f = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    f = normalize(f);
+    var up0 = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(dot(f, up0)) > 0.95) {
+        up0 = vec3<f32>(0.0, 0.0, 1.0);
+    }
+    fr.f = f;
+    fr.rt = normalize(cross(f, up0));
+    fr.up = cross(fr.rt, f);
+    return fr;
+}
+
+fn eye_center(c: Creature, fr: Frame, side: f32) -> vec3<f32> {
+    return c.center + c.radius * (0.74 * fr.f + 0.40 * fr.up + 0.34 * side * fr.rt);
+}
+
+// Distance to the organs of one creature; .y = material
+// (1 eye, 2 mouth, 3 claw, 4 ear).
+fn organ_sdf(p: vec3<f32>, c: Creature, fr: Frame) -> vec2<f32> {
+    let r = c.radius;
+    var d = 1e9;
+    var mat = 0.0;
+    if (c.eye > 0.08) {
+        let re = r * (0.10 + 0.16 * c.eye);
+        for (var k = 0; k < 2; k++) {
+            let side = select(-1.0, 1.0, k == 1);
+            let dd = length(p - eye_center(c, fr, side)) - re;
+            if (dd < d) {
+                d = dd;
+                mat = 1.0;
+            }
+        }
+    }
+    if (c.mouth > 0.08) {
+        let open = 0.03 + 0.06 * c.mouth + 0.10 * c.eat * (0.5 + 0.5 * sin(u.cam_pos.w * 12.0));
+        let mc = c.center + r * (0.93 * fr.f - 0.24 * fr.up);
+        let q = p - mc;
+        let lq = vec3<f32>(dot(q, fr.rt), dot(q, fr.up), dot(q, fr.f));
+        let dd = sd_ellipsoid(lq, r * vec3<f32>(0.16 + 0.22 * c.mouth, open, 0.10));
+        if (dd < d) {
+            d = dd;
+            mat = 2.0;
+        }
+    }
+    if (c.claw > 0.08) {
+        let len = r * (0.3 + 0.7 * c.claw);
+        let pairs = select(1, 2, c.claw > 0.6);
+        for (var j = 0; j < pairs; j++) {
+            let low = f32(j) * 0.4;
+            for (var k = 0; k < 2; k++) {
+                let side = select(-1.0, 1.0, k == 1);
+                let base = c.center + r * (0.45 * fr.f + 0.80 * side * fr.rt - (0.15 + low) * fr.up);
+                let dir = normalize(0.75 * fr.f + 0.55 * side * fr.rt - (0.1 + low * 0.5) * fr.up);
+                let dd = sd_round_cone(p, base, base + dir * len, r * 0.13, r * 0.025);
+                if (dd < d) {
+                    d = dd;
+                    mat = 3.0;
+                }
+            }
+        }
+    }
+    if (abs(c.ear) > 0.08) {
+        let len = r * (0.25 + 0.45 * abs(c.ear));
+        for (var k = 0; k < 2; k++) {
+            let side = select(-1.0, 1.0, k == 1);
+            let base = c.center + r * (0.78 * fr.up + 0.38 * side * fr.rt - 0.15 * fr.f);
+            let dir = normalize(0.85 * fr.up + 0.45 * side * fr.rt - 0.2 * fr.f);
+            let dd = sd_round_cone(p, base, base + dir * len, r * 0.11, r * 0.035);
+            if (dd < d) {
+                d = dd;
+                mat = 4.0;
+            }
+        }
+    }
+    return vec2<f32>(d, mat);
+}
+
+struct OrganHit {
+    t: f32,
+    idx: i32,
+};
+
+fn trace_organs(ro: vec3<f32>, rd: vec3<f32>, t_max: f32) -> OrganHit {
+    var hit: OrganHit;
+    hit.t = t_max;
+    hit.idx = -1;
+    let count = min(u.ip2.x, 256u);
+    for (var i = 0u; i < count; i++) {
+        let c = creatures[i];
+        if (c.eye + c.mouth + c.claw + abs(c.ear) < 0.1) {
+            continue;
+        }
+        let bound = c.radius * 2.2;
+        let oc = ro - c.center;
+        let b = dot(oc, rd);
+        let h = b * b - (dot(oc, oc) - bound * bound);
+        if (h < 0.0) {
+            continue;
+        }
+        let sq = sqrt(h);
+        var t = max(-b - sq, 0.0);
+        let t1 = min(-b + sq, hit.t);
+        if (t >= t1) {
+            continue;
+        }
+        let fr = creature_frame(c);
+        let eps = max(c.radius * 0.004, 1e-4);
+        for (var k = 0; k < 48; k++) {
+            let sd = organ_sdf(ro + rd * t, c, fr).x;
+            if (sd < eps) {
+                hit.t = t;
+                hit.idx = i32(i);
+                break;
+            }
+            t += sd;
+            if (t > t1) {
+                break;
+            }
+        }
+    }
+    return hit;
+}
+
+fn shade_organ(ro: vec3<f32>, rd: vec3<f32>, hit: OrganHit) -> vec3<f32> {
+    let c = creatures[hit.idx];
+    let fr = creature_frame(c);
+    let p = ro + rd * hit.t;
+    let e = c.radius * 0.01;
+    let n = normalize(vec3<f32>(
+        organ_sdf(p + vec3<f32>(e, 0.0, 0.0), c, fr).x - organ_sdf(p - vec3<f32>(e, 0.0, 0.0), c, fr).x,
+        organ_sdf(p + vec3<f32>(0.0, e, 0.0), c, fr).x - organ_sdf(p - vec3<f32>(0.0, e, 0.0), c, fr).x,
+        organ_sdf(p + vec3<f32>(0.0, 0.0, e), c, fr).x - organ_sdf(p - vec3<f32>(0.0, 0.0, e), c, fr).x));
+    let mat = organ_sdf(p, c, fr).y;
+    var base = vec3<f32>(0.8);
+    var gloss = 0.3;
+    if (mat < 1.5) {
+        // eye: white with an iris and a pupil looking between ahead and the viewer
+        let side = select(-1.0, 1.0, dot(p - c.center, fr.rt) > 0.0);
+        let ec = eye_center(c, fr, side);
+        let look = normalize(fr.f * 0.6 + normalize(u.cam_pos.xyz - ec) * 0.8);
+        let a = dot(normalize(p - ec), look);
+        base = vec3<f32>(0.85);
+        if (a > 0.80) {
+            base = hsv(c.hue + 0.5, 0.7, 0.55);
+        }
+        if (a > 0.90) {
+            base = vec3<f32>(0.01);
+        }
+        gloss = 1.0;
+    } else if (mat < 2.5) {
+        base = vec3<f32>(0.18, 0.01, 0.03);
+        gloss = 0.6;
+    } else if (mat < 3.5) {
+        base = vec3<f32>(0.80, 0.74, 0.62);
+        gloss = 0.8;
+    } else {
+        base = hsv(c.hue, 0.55, 0.85);
+        gloss = 0.2;
+    }
+    let L = u.light_dir.xyz;
+    let li = vec3<f32>(1.0, 0.95, 0.88) * u.light_dir.w;
+    let v = -rd;
+    let diff = max(dot(n, L), 0.0);
+    let hv = normalize(L + v);
+    let spec = pow(max(dot(n, hv), 0.0), 80.0) * gloss;
+    let rim = pow(1.0 - max(dot(n, v), 0.0), 3.0) * 0.25;
+    return base * (sky(n) * 0.5 + diff * li * 0.9) + spec * li + rim * sky(n);
+}
+
+// Expanding rings around calling creatures and a halo around the selection.
+fn creature_halos(ro: vec3<f32>, rd: vec3<f32>, t_limit: f32) -> vec3<f32> {
+    var col = vec3<f32>(0.0);
+    let count = min(u.ip2.x, 256u);
+    for (var i = 0u; i < count; i++) {
+        let c = creatures[i];
+        let oc = ro - c.center;
+        let tc = -dot(oc, rd);
+        if (tc < 0.0) {
+            continue;
+        }
+        let dc = length(oc + rd * tc);
+        let px = tc * u.screen.w;
+        if (has2(F2_SOUND) && c.level > 0.03 && tc < t_limit + c.radius * 3.0) {
+            for (var k = 0; k < 2; k++) {
+                let ph = fract(u.cam_pos.w * 0.7 + f32(i) * 0.37 + f32(k) * 0.5);
+                let rr = c.radius * (1.1 + 2.4 * ph);
+                let w = c.radius * 0.05 + px;
+                let x = (dc - rr) / w;
+                col += exp(-x * x) * (1.0 - ph) * c.level * hsv(c.hue, 0.35, 1.0) * 0.5 * u.p4.z;
+            }
+        }
+        if (c.selected > 0.5) {
+            let x = (dc - c.radius * 1.45) / (c.radius * 0.04 + px * 1.5);
+            col += exp(-x * x) * vec3<f32>(1.0, 0.85, 0.4) * 0.7;
+        }
+    }
+    return col;
+}
+
+// Faint green haze where there is food.
+fn food_haze(ro: vec3<f32>, rd: vec3<f32>, t_limit: f32) -> f32 {
+    let th = box_hit(ro, rd, vec3<f32>(-1.0), vec3<f32>(1.0));
+    if (th.x >= th.y || th.y <= 0.0) {
+        return 0.0;
+    }
+    let t0 = max(th.x, 0.0);
+    let t1 = min(th.y, t_limit);
+    if (t1 <= t0) {
+        return 0.0;
+    }
+    let steps = 32;
+    let dt = (t1 - t0) / f32(steps);
+    var acc = 0.0;
+    var t = t0 + dt * ign(vec2<f32>(rd.xy * 997.0));
+    for (var k = 0; k < steps; k++) {
+        acc += textureSampleLevel(aux, samp, (ro + rd * t) * 0.5 + 0.5, 0.0).x * dt;
+        t += dt;
+    }
+    return 1.0 - exp(-acc * u.p4.x);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let near = u.inv_view_proj * vec4<f32>(in.ndc, 0.0, 1.0);
@@ -622,6 +946,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         t_hit = m.t_hit;
     }
     col += trans * background(ro, rd);
+    if (has2(F2_FOOD) && u.p4.x > 0.0) {
+        let haze = food_haze(ro, rd, t_hit);
+        col = mix(col, vec3<f32>(0.05, 0.16, 0.03), haze * 0.7);
+    }
+    if (has2(F2_ORGANS) && u.ip2.x > 0u) {
+        let oh = trace_organs(ro, rd, t_hit + 0.05);
+        if (oh.idx >= 0) {
+            col = shade_organ(ro, rd, oh);
+            t_hit = min(t_hit, oh.t);
+        }
+    }
+    if (u.ip2.x > 0u) {
+        col += creature_halos(ro, rd, t_hit);
+    }
     if (has(FLAG_BOX)) {
         col = box_edges(col, ro, rd, t_hit);
     }
