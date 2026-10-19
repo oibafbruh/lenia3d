@@ -25,10 +25,11 @@ multiple kernels.
 
 **Windows:**
 
-1. Open the latest green **build** run under [Actions](../../actions) and
-   download the `lenia3d-windows` artifact at the bottom of the run page. You must be
-   signed in to GitHub to download it.
-2. Unzip it and run `lenia3d.exe`.
+1. Download `lenia3d.exe` from the **latest** pre-release on the
+   [Releases page](../../releases). CI rebuilds it on every push.
+   Each green **build** run under [Actions](../../actions) also has a `lenia3d-windows`
+   artifact.
+2. Run `lenia3d.exe`.
 
 You need an up-to-date GPU driver, but no other installs.
 

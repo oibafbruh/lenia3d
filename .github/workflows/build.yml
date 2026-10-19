@@ -14,6 +14,8 @@ jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 30
+    permissions:
+      contents: write # publish the "latest" pre-release
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,6 +32,21 @@ jobs:
         with:
           name: lenia3d-windows
           path: dist/
+      # Also publish the exe on the Releases page (easier to download than an
+      # Actions artifact). Never fails the build.
+      - name: Publish "latest" pre-release
+        if: github.event_name == 'push'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          7z a -tzip lenia3d-windows.zip ./dist/*
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/lenia3d.exe lenia3d-windows.zip \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "Latest build ($GITHUB_REF_NAME)" \
+            --notes "Automatic build of $GITHUB_SHA. Download lenia3d.exe (or the zip with the README) and run it."
       - name: Unit tests (CPU only)
         run: cargo test --release --lib
 
