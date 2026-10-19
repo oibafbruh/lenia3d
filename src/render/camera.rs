@@ -18,7 +18,7 @@ pub struct OrbitCamera {
 
 impl Default for OrbitCamera {
     fn default() -> Self {
-        let p = Pose { target: Vec3::ZERO, yaw: 0.6, pitch: 0.38, dist: 3.6 };
+        let p = Pose { target: Vec3::ZERO, yaw: 0.6, pitch: 0.38, dist: 4.1 };
         Self { goal: p, cur: p, fov_y: 45f32.to_radians() }
     }
 }

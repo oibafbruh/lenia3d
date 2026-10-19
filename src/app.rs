@@ -322,6 +322,11 @@ impl State {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
+                log::debug!(
+                    "mouse {button:?} pressed={pressed} consumed={} over_egui={}",
+                    resp.consumed,
+                    self.egui_ctx.is_pointer_over_egui()
+                );
                 if pressed && (resp.consumed || self.egui_ctx.is_pointer_over_egui()) {
                     self.input.drag_from_ui = true;
                     return;
@@ -846,7 +851,21 @@ impl State {
         self.handle_tools(&mut enc);
         if self.ui.running {
             let steps = self.ui.steps_per_frame;
-            self.world.sim.encode_steps(&mut enc, steps);
+            // Big worlds: separate submissions keep each GPU packet short
+            // (Windows resets the driver if one runs for ~2 s).
+            let per_submit = match self.world.n() {
+                n if n >= 512 => 1,
+                n if n >= 256 => 4,
+                _ => steps,
+            };
+            let mut left = steps;
+            while left > 0 {
+                let k = left.min(per_submit);
+                let mut step_enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("steps") });
+                self.world.sim.encode_steps(&mut step_enc, k);
+                self.queue.submit([step_enc.finish()]);
+                left -= k;
+            }
             self.steps_counter.1 += steps as u64;
             self.volume_dirty = true;
         }

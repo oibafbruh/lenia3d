@@ -361,7 +361,7 @@ fn rule_section(ui: &mut egui::Ui, st: &mut UiState, info: &FrameInfo) {
         let nch = rule.channels;
         let mut remove = None;
         for (i, k) in rule.kernels.iter_mut().enumerate() {
-            let title = if nch > 1 { format!("Kernel {}   ch{} → ch{}", i + 1, k.src, k.dst) } else { format!("Kernel {}", i + 1) };
+            let title = if nch > 1 { format!("Kernel {}   ch{} -> ch{}", i + 1, k.src, k.dst) } else { format!("Kernel {}", i + 1) };
             egui::CollapsingHeader::new(title).id_salt(("kernel", i)).default_open(i == 0).show(ui, |ui| {
                 kernel_editor(ui, k, nch, i);
                 if ui.small_button("Remove kernel").clicked() {
