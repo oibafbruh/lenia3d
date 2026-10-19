@@ -1260,7 +1260,7 @@ impl State {
         }
         if self.world.maintain(&self.device, &mut enc) {
             self.volume_dirty = true;
-            self.ui.set_status("The population died out: new founders were seeded", now);
+            self.ui.set_status("Population was dying out: new founders seeded (Keep alive)", now);
         }
 
         // creature tracking readback

@@ -79,7 +79,7 @@ pub struct EcologyParams {
     /// Upkeep is multiplied by 1 + (mass / capacity)², so populations level
     /// off instead of starving out or filling the world.
     pub capacity: f32,
-    /// Seed new founders when the population dies out.
+    /// Seed new founders when fewer than two viable creatures are left.
     pub keep_alive: bool,
 }
 

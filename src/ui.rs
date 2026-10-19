@@ -764,7 +764,7 @@ fn evolution_section(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Acti
     egui::CollapsingHeader::new(RichText::new("Evolution & ecology").strong()).default_open(true).show(ui, |ui| {
         let e = &mut st.eco;
         ui.checkbox(&mut e.enabled, "Ecology (food, metabolism, reproduction)");
-        ui.checkbox(&mut e.keep_alive, "Keep alive").on_hover_text("Seed new founders when the whole population has died out");
+        ui.checkbox(&mut e.keep_alive, "Keep alive").on_hover_text("Seed new founders when fewer than two healthy creatures are left");
         ui.add(egui::Slider::new(&mut e.capacity, 0.0..=50000.0).logarithmic(true).text("carrying capacity"))
             .on_hover_text("Living mass a 64³ world can support. The more creatures, the higher everyone's upkeep, so the population levels off (0 = unlimited)");
         ui.add(egui::Slider::new(&mut e.fertility, 0.0..=1.0).text("default fertility")).on_hover_text("Food level that regrows on normal ground");

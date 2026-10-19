@@ -25,16 +25,17 @@ pub struct World {
     pub traits: TraitRanges,
     pub rng: Rng,
     seed: u32,
-    /// A living population was seen since the last (re)seeding; if it dies
+    /// A viable population was seen since the last (re)seeding; if it dies
     /// out and keep-alive is on, `reseed` is raised.
     population_seen: bool,
     /// Founders should be seeded (population died out); see `maintain`.
     pub reseed: bool,
 }
 
-/// Living mass below which a population counts as dead (fraction of the
-/// budding mass).
-const EXTINCT_FRACTION: f32 = 0.3;
+/// Creatures lighter than this fraction of the budding mass are wisps that
+/// will not recover; keep-alive seeds founders when fewer than two creatures
+/// are heavier.
+const VIABLE_FRACTION: f32 = 0.25;
 
 /// Upkeep multiplier for `mass` living matter in an `n`³ world.
 pub fn crowd_factor(mass: f32, capacity: f32, n: u32) -> f32 {
@@ -272,8 +273,9 @@ impl World {
             let eco = &fl.eco;
             let mass: f32 = self.tracker.creatures.iter().map(|c| c.mass).sum();
             fl.crowd = if eco.enabled { crowd_factor(mass, eco.capacity, n) } else { 1.0 };
-            let alive = mass >= EXTINCT_FRACTION * eco.bud_mass.max(100.0);
-            if alive {
+            let min_mass = VIABLE_FRACTION * eco.bud_mass.max(100.0);
+            let viable = self.tracker.creatures.iter().filter(|c| c.mass >= min_mass).count();
+            if viable >= 2 {
                 self.population_seen = true;
             } else if self.population_seen && eco.enabled && eco.keep_alive {
                 self.population_seen = false;

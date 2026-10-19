@@ -85,7 +85,7 @@ pub fn life_tick(g: &Gpu, world: &mut World) -> usize {
     let mut enc = g.device.create_command_encoder(&Default::default());
     world.apply_ops(&g.device, &mut enc, &ops);
     if world.maintain(&g.device, &mut enc) {
-        eprintln!("  step {:>6}  population died out: founders seeded", world.sim.generation);
+        eprintln!("  step {:>6}  population dying out: founders seeded", world.sim.generation);
     }
     g.queue.submit([enc.finish()]);
     ops.len()
