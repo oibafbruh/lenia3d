@@ -140,7 +140,20 @@ tools/reference.py   NumPy reference implementation used by tests
 - **Not verifiable here:** real-GPU speed and visual quality on your screen. A built-in
   benchmark (`--bench`) prints per-stage timings that you can send back.
 
-## 8. Milestones
+## 8. Status (M1 delivered)
+
+- Done: classic multi-channel/multi-kernel 3D Lenia on a custom GPU FFT, verified against
+  rustfft and a direct CPU convolution (Vulkan/lavapipe and DX12/WARP in CI).
+- Done: renderer modes (Organic skin+core, Glow, X-ray), cross-section cuts, shadows,
+  bloom, follow mode with a scrolling floor.
+- Done: live rule editor with plots, Mutate / Random rule buttons, brushes, walls, save/load,
+  and screenshots.
+- Built-in presets: 7 original presets (`presets/`), all stable in the GPU check.
+- Bert Chan's species: downloaded on demand. 33 of his 36 species are stable in our
+  engine; sheets and rods load into their exact 64³ world.
+- Not yet: everything in M2 to M4 below.
+
+## 9. Milestones
 
 | Milestone | Contents |
 |---|---|

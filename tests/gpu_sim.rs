@@ -248,3 +248,51 @@ fn center_of_mass_and_roll() {
     let c2 = stats(&sim)[0].center.unwrap();
     assert!(wrap_err(c2[0], 1.5) < 0.05 && wrap_err(c2[1], 7.5) < 0.05 && wrap_err(c2[2], 4.5) < 0.05, "{c2:?}");
 }
+
+#[test]
+fn save_load_roundtrip_and_channel_change() {
+    let Some(g) = gpu() else { return };
+    use lenia3d::world::World;
+    let presets = lenia3d::sim::preset::builtin_presets();
+    let p = presets.iter().find(|p| p.rule.channels == 2 && p.pattern().is_some()).unwrap_or(&presets[0]).clone();
+    let mut w = World::new(&g.device, 32, p.rule.clone());
+    w.load_preset(&g.device, &g.queue, &p, 0.5);
+    let mut enc = g.device.create_command_encoder(&Default::default());
+    w.sim.encode_steps(&mut enc, 3);
+    g.queue.submit([enc.finish()]);
+    let before: Vec<Vec<f32>> = (0..w.sim.channels.len()).map(|c| w.sim.download(&g.device, &g.queue, c)).collect();
+    let dir = std::env::temp_dir().join(format!("lenia3d_test_{}.l3d", std::process::id()));
+    w.save(&g.device, &g.queue, &dir).unwrap();
+
+    let mut w2 = World::new(&g.device, 64, LeniaParams::default());
+    w2.load(&g.device, &g.queue, &dir).unwrap();
+    let _ = std::fs::remove_file(&dir);
+    assert_eq!(w2.n(), 32);
+    assert_eq!(w2.sim.params(), w.sim.params());
+    for (c, b) in before.iter().enumerate() {
+        let a = w2.sim.download(&g.device, &g.queue, c);
+        let err = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+        assert!(err < 1e-4, "channel {c} differs by {err}");
+    }
+
+    // grow to 3 channels and back to 1; data in kept channels must survive
+    let mut rule = w2.sim.params().clone();
+    rule.channels = 3;
+    w2.sim.set_params(&g.device, &g.queue, rule.clone());
+    assert_eq!(w2.sim.channels.len(), 3);
+    let c0 = w2.sim.download(&g.device, &g.queue, 0);
+    assert_eq!(c0, w2.sim.download(&g.device, &g.queue, 0));
+    let err0 = c0.iter().zip(&before[0]).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    assert!(err0 < 1e-4);
+    let mut enc = g.device.create_command_encoder(&Default::default());
+    w2.sim.encode_steps(&mut enc, 2);
+    g.queue.submit([enc.finish()]);
+    rule.channels = 1;
+    rule.kernels.truncate(1);
+    w2.sim.set_params(&g.device, &g.queue, rule);
+    let mut enc = g.device.create_command_encoder(&Default::default());
+    w2.sim.encode_steps(&mut enc, 2);
+    g.queue.submit([enc.finish()]);
+    let out = w2.sim.download(&g.device, &g.queue, 0);
+    assert!(out.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)));
+}
